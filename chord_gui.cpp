@@ -6,6 +6,7 @@
 #include <windowsx.h>
 #include <commdlg.h>
 #include <gdiplus.h>
+#include <mmsystem.h>
 
 #include <algorithm>
 #include <array>
@@ -20,6 +21,9 @@
 
 #include "chord_algorithms.hpp"
 #include "chord_generator.hpp"
+#include "progression_config.hpp"
+
+int BPM=120;
 
 namespace {
 
@@ -28,10 +32,13 @@ constexpr int ID_SETTINGS=1004;
 constexpr int ID_PRESET_ACTION=1005;
 constexpr int ID_PRESET_BASE=1100;
 constexpr int ID_SLOT_BASE=1200;
+constexpr int ID_CHORD_HEADER_BASE=1400;
+constexpr UINT WM_CLEAR_CHORD_HOVER=WM_APP+1;
 
 constexpr int DESIGN_WIDTH=1000;
 constexpr int DESIGN_HEIGHT=1000;
 constexpr int MIN_CLIENT_SIZE=600;
+constexpr int SETTINGS_DESIGN_SIZE=800;
 constexpr int SLOT_Y=735;
 constexpr int SLOT_SIZE=125;
 const std::array<int,4> SLOT_X={{100,325,550,775}};
@@ -56,11 +63,15 @@ struct ControlLayout {
 std::vector<ControlLayout> controls;
 
 HWND main_window=nullptr;
+HWND configuration_window=nullptr;
 HWND settings_button=nullptr;
 HWND generate_button=nullptr;
+HWND chord_editor=nullptr;
+WNDPROC chord_editor_procedure_original=nullptr;
 std::array<HWND,5> preset_buttons={{nullptr,nullptr,nullptr,nullptr,nullptr}};
 std::array<HWND,4> slot_buttons={{nullptr,nullptr,nullptr,nullptr}};
 std::array<HWND,4> preset_labels={{nullptr,nullptr,nullptr,nullptr}};
+std::array<HWND,4> chord_header_targets={{nullptr,nullptr,nullptr,nullptr}};
 std::array<int,4> slot_presets={{2,2,2,2}};
 std::array<WNDPROC,5> preset_button_procedures={{nullptr,nullptr,nullptr,nullptr,nullptr}};
 int active_slot=0;
@@ -77,15 +88,30 @@ double current_scale=1.0;
 bool interactive_resize=false;
 int applied_client_width=-1;
 int applied_client_height=-1;
+HDC main_background_dc=nullptr;
+HBITMAP main_background_bitmap=nullptr;
+HGDIOBJ main_background_old_bitmap=nullptr;
+int main_background_width=0;
+int main_background_height=0;
+bool main_background_dirty=true;
 
 ULONG_PTR gdiplus_token=0;
 std::unique_ptr<Gdiplus::Image> background_image;
 std::wstring background_path;
 std::array<std::unique_ptr<Gdiplus::Image>,5> emotion_images;
 std::unique_ptr<Gdiplus::Image> arrow_image;
+std::unique_ptr<Gdiplus::Image> pentagon_image;
+std::string progression_config_path;
+bool configuration_interactive_resize=false;
+int configuration_tab=0;
+int dragged_weight_axis=-1;
 std::string current_mode="C Ionian";
 ncnl::GeneratedProgression displayed_progression{};
-bool has_displayed_progression=false;
+int editing_chord=-1;
+int dragged_midi_position=-1;
+int dragged_midi_pitch=-1;
+HANDLE midi_playback_thread=nullptr;
+HANDLE midi_stop_event=nullptr;
 
 std::wstring utf8_to_wide(const std::string& value) {
     if (value.empty()) {
@@ -104,6 +130,51 @@ std::wstring utf8_to_wide(const std::string& value) {
         &result[0],size
     );
     return result;
+}
+
+std::string wide_to_utf8(const std::wstring& value) {
+    if (value.empty()) {
+        return {};
+    }
+    int size=WideCharToMultiByte(
+        CP_UTF8,0,value.data(),static_cast<int>(value.size()),
+        nullptr,0,nullptr,nullptr
+    );
+    std::string result(static_cast<std::size_t>(size),'\0');
+    WideCharToMultiByte(
+        CP_UTF8,0,value.data(),static_cast<int>(value.size()),
+        &result[0],size,nullptr,nullptr
+    );
+    return result;
+}
+
+std::wstring get_window_text(HWND window) {
+    int length=GetWindowTextLengthW(window);
+    std::wstring result(static_cast<std::size_t>(length+1),L'\0');
+    if (length>0) {
+        GetWindowTextW(window,&result[0],length+1);
+    }
+    result.resize(static_cast<std::size_t>(length));
+    return result;
+}
+
+void add_rounded_rectangle(
+    Gdiplus::GraphicsPath& path,
+    const Gdiplus::RectF& bounds,
+    float radius
+) {
+    float diameter=std::min(
+        radius*2.0f,std::min(bounds.Width,bounds.Height)
+    );
+    Gdiplus::RectF arc(bounds.X,bounds.Y,diameter,diameter);
+    path.AddArc(arc,180.0f,90.0f);
+    arc.X=bounds.X+bounds.Width-diameter;
+    path.AddArc(arc,270.0f,90.0f);
+    arc.Y=bounds.Y+bounds.Height-diameter;
+    path.AddArc(arc,0.0f,90.0f);
+    arc.X=bounds.X;
+    path.AddArc(arc,90.0f,90.0f);
+    path.CloseFigure();
 }
 
 std::wstring executable_directory() {
@@ -146,6 +217,7 @@ bool load_background(const std::wstring& path) {
         return false;
     }
     background_image=std::move(image);
+    main_background_dirty=true;
     if (main_window) {
         InvalidateRect(main_window,nullptr,FALSE);
     }
@@ -169,6 +241,7 @@ void load_interface_images() {
         emotion_images[static_cast<std::size_t>(preset)]=load_png(path.str());
     }
     arrow_image=load_png(root+L"\\arrow.png");
+    pentagon_image=load_png(root+L"\\res\\penta_dim.png");
 }
 
 void choose_background(HWND owner) {
@@ -299,6 +372,22 @@ void apply_layout(HWND window) {
     if (positions) {
         EndDeferWindowPos(positions);
     }
+    for (const auto& control:controls) {
+        wchar_t class_name[32]={};
+        GetClassNameW(control.window,class_name,32);
+        if (lstrcmpiW(class_name,L"BUTTON")==0) {
+            RECT bounds{};
+            GetClientRect(control.window,&bounds);
+            int radius=std::max(14,static_cast<int>(std::lround(32*current_scale)));
+            SetWindowRgn(
+                control.window,
+                CreateRoundRectRgn(
+                    0,0,bounds.right+1,bounds.bottom+1,radius,radius
+                ),
+                TRUE
+            );
+        }
+    }
     applied_client_width=client_width;
     applied_client_height=client_height;
     InvalidateRect(window,nullptr,FALSE);
@@ -399,6 +488,65 @@ int slot_at_client_point(HWND window,POINT point) {
         }
     }
     return -1;
+}
+
+bool piano_logical_point(HWND window,POINT point,double& logical_x,double& logical_y) {
+    RECT client{};
+    GetClientRect(window,&client);
+    int width=client.right-client.left;
+    int height=client.bottom-client.top;
+    double scale=std::max(0.25,std::min(
+        width/static_cast<double>(DESIGN_WIDTH),
+        height/static_cast<double>(DESIGN_HEIGHT)
+    ));
+    double offset_x=(width-DESIGN_WIDTH*scale)/2.0;
+    double offset_y=(height-DESIGN_HEIGHT*scale)/2.0;
+    logical_x=(point.x-offset_x)/scale;
+    logical_y=(point.y-offset_y)/scale;
+    return true;
+}
+
+int piano_position_at_client_point(HWND window,POINT point,bool header_only) {
+    double logical_x=0.0;
+    double logical_y=0.0;
+    piano_logical_point(window,point,logical_x,logical_y);
+    double bottom=header_only ? 347.0 : 645.0;
+    if (logical_y<295.0 || logical_y>bottom ||
+        logical_x<132.0 || logical_x>950.0) {
+        return -1;
+    }
+    int position=static_cast<int>((logical_x-132.0)/((950.0-132.0)/4.0));
+    return std::max(0,std::min(3,position));
+}
+
+int piano_header_at_client_point(HWND window,POINT point) {
+    return piano_position_at_client_point(window,point,true);
+}
+
+bool piano_note_at_client_point(HWND window,POINT point,int& position,int& pitch) {
+    double logical_x=0.0;
+    double logical_y=0.0;
+    piano_logical_point(window,point,logical_x,logical_y);
+    const double grid_left=132.0;
+    const double grid_top=347.0;
+    const double grid_bottom=645.0;
+    const double section_width=(950.0-grid_left)/4.0;
+    if (logical_x<grid_left || logical_x>950.0 ||
+        logical_y<grid_top || logical_y>=grid_bottom) {
+        return false;
+    }
+    position=std::max(0,std::min(
+        3,static_cast<int>((logical_x-grid_left)/section_width)
+    ));
+    double within_section=logical_x-(grid_left+position*section_width);
+    if (within_section<10.0 || within_section>section_width-10.0) {
+        return false;
+    }
+    int lane=std::max(0,std::min(
+        11,static_cast<int>((logical_y-grid_top)/((grid_bottom-grid_top)/12.0))
+    ));
+    pitch=11-lane;
+    return true;
 }
 
 RECT slot_client_rect(HWND window,int position) {
@@ -516,18 +664,139 @@ LRESULT CALLBACK preset_button_procedure(
         : DefWindowProcW(window,message,w_param,l_param);
 }
 
+struct MidiPlaybackData {
+    HMIDIOUT output;
+    HANDLE stop_event;
+    int bpm;
+    std::array<ncnl::Chord,4> chords;
+};
+
+void send_midi_note(HMIDIOUT output,int note,int velocity,bool note_on) {
+    DWORD status=note_on ? 0x90u : 0x80u;
+    DWORD message=status |
+        (static_cast<DWORD>(note&0x7F)<<8) |
+        (static_cast<DWORD>(velocity&0x7F)<<16);
+    midiOutShortMsg(output,message);
+}
+
+DWORD WINAPI midi_playback_procedure(LPVOID parameter) {
+    std::unique_ptr<MidiPlaybackData> data(
+        static_cast<MidiPlaybackData*>(parameter)
+    );
+    // General MIDI program 0：Acoustic Grand Piano。
+    midiOutShortMsg(data->output,0xC0u);
+    int beat_ms=std::max(60,60000/std::max(1,data->bpm));
+    int sounding_ms=std::max(40,beat_ms*9/10);
+
+    bool stopping=false;
+    while (!stopping) {
+        for (int position=0;position<4 && !stopping;++position) {
+            for (int pitch_class:data->chords[position]) {
+                send_midi_note(data->output,60+pitch_class,92,true);
+            }
+            stopping=WaitForSingleObject(
+                data->stop_event,static_cast<DWORD>(sounding_ms)
+            )==WAIT_OBJECT_0;
+            for (int pitch_class:data->chords[position]) {
+                send_midi_note(data->output,60+pitch_class,0,false);
+            }
+            if (!stopping) {
+                stopping=WaitForSingleObject(
+                    data->stop_event,static_cast<DWORD>(beat_ms-sounding_ms)
+                )==WAIT_OBJECT_0;
+            }
+        }
+    }
+    midiOutReset(data->output);
+    midiOutClose(data->output);
+    return 0;
+}
+
+void stop_midi_playback() {
+    if (!midi_playback_thread) {
+        return;
+    }
+    SetEvent(midi_stop_event);
+    if (WaitForSingleObject(midi_playback_thread,5000)==WAIT_OBJECT_0) {
+        CloseHandle(midi_playback_thread);
+        CloseHandle(midi_stop_event);
+        midi_playback_thread=nullptr;
+        midi_stop_event=nullptr;
+    }
+}
+
+void toggle_midi_playback(HWND owner) {
+    if (midi_playback_thread) {
+        stop_midi_playback();
+        return;
+    }
+
+    std::unique_ptr<MidiPlaybackData> data(new MidiPlaybackData{});
+    for (int position=0;position<4;++position) {
+        const std::string& notes=displayed_progression.chords[position].notes;
+        if (notes.empty()) {
+            MessageBoxW(
+                owner,L"请先生成或填写完整的四个和弦。",
+                L"无法播放",MB_OK|MB_ICONINFORMATION
+            );
+            return;
+        }
+        data->chords[position]=ncnl::parse_chord(notes);
+    }
+
+    MMRESULT opened=midiOutOpen(
+        &data->output,MIDI_MAPPER,0,0,CALLBACK_NULL
+    );
+    if (opened!=MMSYSERR_NOERROR) {
+        MessageBoxW(
+            owner,L"无法打开 Windows MIDI 播放设备。",
+            L"无法播放",MB_OK|MB_ICONERROR
+        );
+        return;
+    }
+
+    midi_stop_event=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    if (!midi_stop_event) {
+        midiOutClose(data->output);
+        MessageBoxW(owner,L"无法创建播放事件。",L"无法播放",MB_OK|MB_ICONERROR);
+        return;
+    }
+    data->stop_event=midi_stop_event;
+    data->bpm=BPM;
+    midi_playback_thread=CreateThread(
+        nullptr,0,midi_playback_procedure,data.get(),0,nullptr
+    );
+    if (!midi_playback_thread) {
+        CloseHandle(midi_stop_event);
+        midi_stop_event=nullptr;
+        midiOutClose(data->output);
+        MessageBoxW(owner,L"无法创建播放线程。",L"无法播放",MB_OK|MB_ICONERROR);
+        return;
+    }
+    data.release();
+}
+
 void generate_and_show(HWND owner) {
     try {
+        stop_midi_playback();
         std::array<ncnl::ChordConstraint,4> constraints;
+        bool all_chords_filled=true;
+        for (const auto& chord:displayed_progression.chords) {
+            all_chords_filled=all_chords_filled && !chord.notes.empty();
+        }
         for (int position=0;position<4;++position) {
             constraints[position].emotion_preset=slot_presets[position];
-            constraints[position].fixed_notes="";
+            // 只重新生成已清空的位置；如果四个位置都有和弦，则把这次操作
+            // 解释为“全部重新生成”。
+            constraints[position].fixed_notes=all_chords_filled
+                ? ""
+                : displayed_progression.chords[position].notes;
         }
 
         displayed_progression=ncnl::generate_progression(
             current_mode,constraints
         );
-        has_displayed_progression=true;
+        main_background_dirty=true;
         RedrawWindow(
             main_window,nullptr,nullptr,
             RDW_INVALIDATE|RDW_UPDATENOW|RDW_ALLCHILDREN
@@ -559,111 +828,387 @@ void draw_centered_text(
     graphics.DrawString(text.c_str(),-1,&font,bounds,&format,&brush);
 }
 
+bool progression_is_complete() {
+    for (const auto& chord:displayed_progression.chords) {
+        if (chord.notes.empty()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+unsigned int chord_pitch_mask(const std::string& notes) {
+    unsigned int mask=0;
+    for (int pitch_class:ncnl::parse_chord(notes)) {
+        mask|=1u<<pitch_class;
+    }
+    return mask;
+}
+
+void recalculate_progression_quality() {
+    if (!progression_is_complete()) {
+        displayed_progression.quality_score=0.0;
+        return;
+    }
+    double total=0.0;
+    int repeated=0;
+    for (int position=0;position<4;++position) {
+        int next_position=(position+1)%4;
+        const std::string& current=displayed_progression.chords[position].notes;
+        const std::string& next=
+            displayed_progression.chords[next_position].notes;
+        total+=ncnl::chord_progression_score(current_mode,current,next);
+        repeated+=chord_pitch_mask(current)==chord_pitch_mask(next);
+    }
+    displayed_progression.quality_score=total/4.0-14.0*repeated;
+}
+
+std::string pitch_classes_to_text(const ncnl::Chord& chord) {
+    static const std::array<const char*,12> names={{
+        "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"
+    }};
+    std::ostringstream text;
+    for (std::size_t index=0;index<chord.size();++index) {
+        if (index>0) {
+            text<<' ';
+        }
+        text<<names[static_cast<std::size_t>(chord[index])];
+    }
+    return text.str();
+}
+
+void hide_chord_editor();
+
+void refresh_progression_display() {
+    recalculate_progression_quality();
+    main_background_dirty=true;
+    InvalidateRect(main_window,nullptr,FALSE);
+}
+
+void clear_chord_at_client_point(HWND window,POINT point) {
+    int position=piano_position_at_client_point(window,point,false);
+    if (position<0 || displayed_progression.chords[position].notes.empty()) {
+        return;
+    }
+    stop_midi_playback();
+    hide_chord_editor();
+    displayed_progression.chords[position]={"",0.0};
+    refresh_progression_display();
+}
+
+bool begin_midi_note_drag(HWND window,POINT point) {
+    int position=-1;
+    int pitch=-1;
+    if (!piano_note_at_client_point(window,point,position,pitch) ||
+        displayed_progression.chords[position].notes.empty()) {
+        return false;
+    }
+    ncnl::Chord chord=ncnl::parse_chord(
+        displayed_progression.chords[position].notes
+    );
+    if (std::find(chord.begin(),chord.end(),pitch)==chord.end()) {
+        return false;
+    }
+    dragged_midi_position=position;
+    dragged_midi_pitch=pitch;
+    stop_midi_playback();
+    SetCapture(window);
+    SetCursor(LoadCursorW(nullptr,IDC_SIZENS));
+    return true;
+}
+
+void update_midi_note_drag(HWND window,POINT point) {
+    if (dragged_midi_position<0 || dragged_midi_pitch<0) {
+        return;
+    }
+    int hovered_position=-1;
+    int target_pitch=-1;
+    if (!piano_note_at_client_point(
+            window,point,hovered_position,target_pitch
+        ) || target_pitch==dragged_midi_pitch) {
+        return;
+    }
+
+    auto& displayed=displayed_progression.chords[dragged_midi_position];
+    ncnl::Chord chord=ncnl::parse_chord(displayed.notes);
+    if (std::find(chord.begin(),chord.end(),target_pitch)!=chord.end()) {
+        return;
+    }
+    auto source=std::find(chord.begin(),chord.end(),dragged_midi_pitch);
+    if (source==chord.end()) {
+        return;
+    }
+    *source=target_pitch;
+    std::string notes=pitch_classes_to_text(chord);
+    double emotion=ncnl::chord_emotion_score(current_mode,notes);
+    displayed={notes,emotion};
+    dragged_midi_pitch=target_pitch;
+    refresh_progression_display();
+    SetCursor(LoadCursorW(nullptr,IDC_SIZENS));
+}
+
+void end_midi_note_drag(HWND window,POINT point) {
+    if (dragged_midi_position<0) {
+        return;
+    }
+    update_midi_note_drag(window,point);
+    dragged_midi_position=-1;
+    dragged_midi_pitch=-1;
+    if (GetCapture()==window) {
+        ReleaseCapture();
+    }
+}
+
+void hide_chord_editor() {
+    editing_chord=-1;
+    if (chord_editor) {
+        ShowWindow(chord_editor,SW_HIDE);
+    }
+}
+
+bool commit_chord_editor(bool show_error) {
+    if (editing_chord<0 || editing_chord>=4) {
+        return true;
+    }
+    int position=editing_chord;
+    std::string notes=wide_to_utf8(get_window_text(chord_editor));
+    std::size_t first=notes.find_first_not_of(" \t\r\n");
+    std::size_t last=notes.find_last_not_of(" \t\r\n");
+    if (first==std::string::npos) {
+        notes.clear();
+    }
+    else {
+        notes=notes.substr(first,last-first+1);
+    }
+
+    try {
+        if (notes.empty()) {
+            stop_midi_playback();
+            displayed_progression.chords[position]={"",0.0};
+        }
+        else {
+            ncnl::parse_chord(notes);
+            double score=ncnl::chord_emotion_score(current_mode,notes);
+            stop_midi_playback();
+            displayed_progression.chords[position]={notes,score};
+        }
+        recalculate_progression_quality();
+        hide_chord_editor();
+        main_background_dirty=true;
+        RedrawWindow(
+            main_window,nullptr,nullptr,
+            RDW_INVALIDATE|RDW_UPDATENOW|RDW_ALLCHILDREN
+        );
+        return true;
+    }
+    catch (const std::exception& error) {
+        if (!show_error) {
+            hide_chord_editor();
+            return false;
+        }
+        std::wstring message=utf8_to_wide(error.what());
+        MessageBoxW(
+            main_window,message.c_str(),L"和弦内音格式错误",MB_OK|MB_ICONERROR
+        );
+        SetFocus(chord_editor);
+        SendMessageW(chord_editor,EM_SETSEL,0,-1);
+        return false;
+    }
+}
+
+void begin_chord_edit(HWND window,int position) {
+    if (position<0 || position>=4) {
+        return;
+    }
+    if (editing_chord>=0) {
+        commit_chord_editor(false);
+    }
+
+    RECT client{};
+    GetClientRect(window,&client);
+    int width=client.right-client.left;
+    int height=client.bottom-client.top;
+    double scale=std::max(0.25,std::min(
+        width/static_cast<double>(DESIGN_WIDTH),
+        height/static_cast<double>(DESIGN_HEIGHT)
+    ));
+    int offset_x=static_cast<int>(std::lround((width-DESIGN_WIDTH*scale)/2.0));
+    int offset_y=static_cast<int>(std::lround((height-DESIGN_HEIGHT*scale)/2.0));
+    double section_width=(900.0-82.0)/4.0;
+    int x=offset_x+static_cast<int>(std::lround(
+        (50.0+82.0+position*section_width+5.0)*scale
+    ));
+    int y=offset_y+static_cast<int>(std::lround(300.0*scale));
+    int editor_width=static_cast<int>(std::lround((section_width-10.0)*scale));
+    int editor_height=static_cast<int>(std::lround(42.0*scale));
+
+    editing_chord=position;
+    SetWindowTextW(
+        chord_editor,
+        utf8_to_wide(displayed_progression.chords[position].notes).c_str()
+    );
+    MoveWindow(chord_editor,x,y,editor_width,editor_height,TRUE);
+    int radius=std::max(6,static_cast<int>(std::lround(12*scale)));
+    SetWindowRgn(
+        chord_editor,
+        CreateRoundRectRgn(0,0,editor_width+1,editor_height+1,radius,radius),
+        TRUE
+    );
+    SendMessageW(
+        chord_editor,WM_SETFONT,reinterpret_cast<WPARAM>(card_font),TRUE
+    );
+    ShowWindow(chord_editor,SW_SHOW);
+    SetFocus(chord_editor);
+    SendMessageW(chord_editor,EM_SETSEL,0,-1);
+}
+
+LRESULT CALLBACK chord_editor_procedure(
+    HWND window,
+    UINT message,
+    WPARAM w_param,
+    LPARAM l_param
+) {
+    if (message==WM_KEYDOWN && w_param==VK_RETURN) {
+        commit_chord_editor(true);
+        return 0;
+    }
+    if (message==WM_KEYDOWN && w_param==VK_ESCAPE) {
+        hide_chord_editor();
+        SetFocus(main_window);
+        return 0;
+    }
+    return CallWindowProcW(
+        chord_editor_procedure_original,window,message,w_param,l_param
+    );
+}
+
 void draw_piano_roll(
     Gdiplus::Graphics& graphics,
     float offset_x,
     float offset_y,
     float scale
 ) {
+    static const std::array<const wchar_t*,12> pitch_names={{
+        L"C",L"C#",L"D",L"D#",L"E",L"F",
+        L"F#",L"G",L"G#",L"A",L"A#",L"B"
+    }};
     const float left=offset_x+50.0f*scale;
     const float top=offset_y+295.0f*scale;
     const float roll_width=900.0f*scale;
     const float roll_height=350.0f*scale;
+    const float keyboard_width=82.0f*scale;
     const float header_height=52.0f*scale;
+    const float grid_left=left+keyboard_width;
     const float grid_top=top+header_height;
+    const float grid_width=roll_width-keyboard_width;
     const float grid_height=roll_height-header_height;
-    const float section_width=roll_width/4.0f;
-    const float row_height=grid_height/24.0f;
+    const float section_width=grid_width/4.0f;
+    const float row_height=grid_height/12.0f;
+    const float radius=18.0f*scale;
+
+    Gdiplus::RectF outer(left,top,roll_width,roll_height);
+    Gdiplus::GraphicsPath rounded;
+    add_rounded_rectangle(rounded,outer,radius);
+    Gdiplus::GraphicsState state=graphics.Save();
+    graphics.SetClip(&rounded);
 
     Gdiplus::SolidBrush frame(Gdiplus::Color(238,22,27,34));
     Gdiplus::SolidBrush header(Gdiplus::Color(245,35,42,53));
-    Gdiplus::Pen outline(Gdiplus::Color(255,165,180,205),2.0f*scale);
-    graphics.FillRectangle(&frame,left,top,roll_width,roll_height);
+    graphics.FillRectangle(&frame,outer);
     graphics.FillRectangle(&header,left,top,roll_width,header_height);
 
-    for (int lane=0;lane<24;++lane) {
-        int midi=71-lane;
-        int pitch_class=midi%12;
+    for (int lane=0;lane<12;++lane) {
+        int pitch_class=11-lane;
         bool black_key=pitch_class==1 || pitch_class==3 || pitch_class==6 ||
                        pitch_class==8 || pitch_class==10;
-        Gdiplus::SolidBrush lane_brush(
-            black_key ? Gdiplus::Color(235,27,31,38)
-                      : Gdiplus::Color(225,42,47,56)
-        );
         float y=grid_top+lane*row_height;
-        graphics.FillRectangle(&lane_brush,left,y,roll_width,row_height);
+        Gdiplus::SolidBrush lane_brush(
+            black_key ? Gdiplus::Color(240,25,29,36)
+                      : Gdiplus::Color(232,43,48,58)
+        );
+        graphics.FillRectangle(&lane_brush,grid_left,y,grid_width,row_height);
+
+        Gdiplus::SolidBrush key_background(Gdiplus::Color(255,226,230,236));
+        graphics.FillRectangle(&key_background,left,y,keyboard_width,row_height);
+        if (black_key) {
+            Gdiplus::SolidBrush black_key_brush(Gdiplus::Color(255,36,40,47));
+            graphics.FillRectangle(
+                &black_key_brush,left,y,53.0f*scale,row_height
+            );
+        }
+
+        std::wostringstream key_name;
+        key_name<<pitch_names[static_cast<std::size_t>(pitch_class)]<<L"4";
+        draw_centered_text(
+            graphics,key_name.str(),
+            Gdiplus::RectF(
+                left+52.0f*scale,y,30.0f*scale,row_height
+            ),
+            11.0f*scale,true,Gdiplus::Color(255,35,42,52)
+        );
     }
 
-    Gdiplus::Pen row_line(Gdiplus::Color(100,92,103,118),1.0f);
-    for (int lane=0;lane<=24;++lane) {
+    Gdiplus::Pen row_line(Gdiplus::Color(130,104,115,132),1.0f);
+    for (int lane=0;lane<=12;++lane) {
         float y=grid_top+lane*row_height;
         graphics.DrawLine(&row_line,left,y,left+roll_width,y);
     }
+    Gdiplus::Pen keyboard_edge(Gdiplus::Color(230,150,166,190),2.0f*scale);
+    graphics.DrawLine(
+        &keyboard_edge,grid_left,top,grid_left,top+roll_height
+    );
 
-    Gdiplus::Pen section_line(Gdiplus::Color(230,150,166,190),2.0f*scale);
-    for (int position=0;position<=4;++position) {
-        float x=left+position*section_width;
-        graphics.DrawLine(&section_line,x,top,x,top+roll_height);
-    }
-
-    if (!has_displayed_progression) {
+    Gdiplus::SolidBrush note_fill(Gdiplus::Color(255,55,206,235));
+    Gdiplus::Pen note_edge(Gdiplus::Color(255,166,244,255),1.5f*scale);
+    for (int position=0;position<4;++position) {
+        const auto& chord=displayed_progression.chords[position];
+        std::wstring caption=chord.notes.empty()
+            ? L"双击输入和弦内音"
+            : utf8_to_wide(chord.notes);
         draw_centered_text(
-            graphics,L"点击“生成”后，四个和弦将在钢琴卷帘中显示",
-            Gdiplus::RectF(left,grid_top,roll_width,grid_height),
-            20.0f*scale,false,Gdiplus::Color(210,210,220,235)
+            graphics,caption,
+            Gdiplus::RectF(
+                grid_left+position*section_width,top,
+                section_width,header_height
+            ),
+            chord.notes.empty() ? 12.0f*scale : 16.0f*scale,
+            !chord.notes.empty(),
+            chord.notes.empty() ? Gdiplus::Color(180,205,214,230)
+                                : Gdiplus::Color(255,245,248,255)
         );
-    }
-    else {
-        Gdiplus::SolidBrush note_fill(Gdiplus::Color(255,55,206,235));
-        Gdiplus::Pen note_edge(Gdiplus::Color(255,166,244,255),1.5f*scale);
-        for (int position=0;position<4;++position) {
-            const auto& chord=displayed_progression.chords[position];
-            std::wostringstream caption;
-            caption<<utf8_to_wide(chord.notes)<<L"   "
-                   <<std::fixed<<std::setprecision(1)<<chord.emotion_score;
-            draw_centered_text(
-                graphics,caption.str(),
-                Gdiplus::RectF(
-                    left+position*section_width,top,section_width,header_height
-                ),
-                16.0f*scale,true
-            );
 
-            ncnl::Chord notes=ncnl::parse_chord(chord.notes);
-            for (int pitch_class:notes) {
-                int midi=60+pitch_class;
-                int lane=71-midi;
-                float note_x=left+position*section_width+12.0f*scale;
-                float note_y=grid_top+lane*row_height+1.5f*scale;
-                float note_width=section_width-24.0f*scale;
-                float note_height=std::max(2.0f,row_height-3.0f*scale);
-                graphics.FillRectangle(
-                    &note_fill,note_x,note_y,note_width,note_height
-                );
-                graphics.DrawRectangle(
-                    &note_edge,note_x,note_y,note_width,note_height
-                );
-            }
+        if (chord.notes.empty()) {
+            continue;
+        }
+        ncnl::Chord notes=ncnl::parse_chord(chord.notes);
+        for (int pitch_class:notes) {
+            int lane=11-pitch_class;
+            float note_x=grid_left+position*section_width+10.0f*scale;
+            float note_y=grid_top+lane*row_height+2.0f*scale;
+            float note_width=section_width-20.0f*scale;
+            float note_height=std::max(3.0f,row_height-4.0f*scale);
+            Gdiplus::RectF note_rect(
+                note_x,note_y,note_width,note_height
+            );
+            Gdiplus::GraphicsPath note_path;
+            add_rounded_rectangle(note_path,note_rect,5.0f*scale);
+            graphics.FillPath(&note_fill,&note_path);
+            graphics.DrawPath(&note_edge,&note_path);
+            draw_centered_text(
+                graphics,pitch_names[static_cast<std::size_t>(pitch_class)],
+                note_rect,12.0f*scale,true,Gdiplus::Color(255,12,52,66)
+            );
         }
     }
-    graphics.DrawRectangle(&outline,left,top,roll_width,roll_height);
 
-    if (has_displayed_progression) {
-        std::wostringstream quality;
-        quality<<L"进行质量 "<<std::fixed<<std::setprecision(1)
-               <<displayed_progression.quality_score;
-        draw_centered_text(
-            graphics,quality.str(),
-            Gdiplus::RectF(
-                offset_x+360.0f*scale,offset_y+655.0f*scale,
-                280.0f*scale,35.0f*scale
-            ),
-            15.0f*scale,true
-        );
-    }
+    graphics.Restore(state);
+    Gdiplus::Pen outline(Gdiplus::Color(255,165,180,205),2.0f*scale);
+    graphics.DrawPath(&outline,&rounded);
 
     for (int transition=0;transition<3;++transition) {
-        float x=offset_x+(250.0f+225.0f*transition)*scale;
+        // 箭头对准钢琴卷帘中相邻两个和弦区域的真实分界线。
+        float boundary=132.0f+(transition+1)*(818.0f/4.0f);
+        float x=offset_x+(boundary-25.0f)*scale;
         float y=offset_y+675.0f*scale;
         float size=50.0f*scale;
         if (arrow_image) {
@@ -680,6 +1225,20 @@ void draw_piano_roll(
                 graphics,L"↑",Gdiplus::RectF(x,y,size,size),32.0f*scale,true
             );
         }
+    }
+
+    if (progression_is_complete()) {
+        std::wostringstream quality;
+        quality<<L"进行质量 "<<std::fixed<<std::setprecision(1)
+               <<displayed_progression.quality_score;
+        draw_centered_text(
+            graphics,quality.str(),
+            Gdiplus::RectF(
+                offset_x+330.0f*scale,offset_y+945.0f*scale,
+                340.0f*scale,35.0f*scale
+            ),
+            16.0f*scale,true
+        );
     }
 }
 
@@ -745,6 +1304,54 @@ void draw_background(HWND window,HDC dc,bool draw_details) {
     );
 }
 
+void destroy_main_background_buffer() {
+    if (main_background_dc && main_background_old_bitmap) {
+        SelectObject(main_background_dc,main_background_old_bitmap);
+    }
+    if (main_background_bitmap) {
+        DeleteObject(main_background_bitmap);
+    }
+    if (main_background_dc) {
+        DeleteDC(main_background_dc);
+    }
+    main_background_dc=nullptr;
+    main_background_bitmap=nullptr;
+    main_background_old_bitmap=nullptr;
+    main_background_width=0;
+    main_background_height=0;
+}
+
+bool ensure_main_background_buffer(HWND window,HDC reference) {
+    RECT client{};
+    GetClientRect(window,&client);
+    int width=client.right-client.left;
+    int height=client.bottom-client.top;
+    if (width<=0 || height<=0) {
+        return false;
+    }
+    if (!main_background_dc || width!=main_background_width ||
+        height!=main_background_height) {
+        destroy_main_background_buffer();
+        main_background_dc=CreateCompatibleDC(reference);
+        main_background_bitmap=CreateCompatibleBitmap(reference,width,height);
+        if (!main_background_dc || !main_background_bitmap) {
+            destroy_main_background_buffer();
+            return false;
+        }
+        main_background_old_bitmap=SelectObject(
+            main_background_dc,main_background_bitmap
+        );
+        main_background_width=width;
+        main_background_height=height;
+        main_background_dirty=true;
+    }
+    if (main_background_dirty) {
+        draw_background(window,main_background_dc,!interactive_resize);
+        main_background_dirty=false;
+    }
+    return true;
+}
+
 void paint_window(HWND window) {
     PAINTSTRUCT paint{};
     HDC dc=BeginPaint(window,&paint);
@@ -752,15 +1359,8 @@ void paint_window(HWND window) {
     GetClientRect(window,&client);
     int width=client.right-client.left;
     int height=client.bottom-client.top;
-    if (width>0 && height>0) {
-        HDC buffer=CreateCompatibleDC(dc);
-        HBITMAP bitmap=CreateCompatibleBitmap(dc,width,height);
-        HGDIOBJ old_bitmap=SelectObject(buffer,bitmap);
-        draw_background(window,buffer,!interactive_resize);
-        BitBlt(dc,0,0,width,height,buffer,0,0,SRCCOPY);
-        SelectObject(buffer,old_bitmap);
-        DeleteObject(bitmap);
-        DeleteDC(buffer);
+    if (width>0 && height>0 && ensure_main_background_buffer(window,dc)) {
+        BitBlt(dc,0,0,width,height,main_background_dc,0,0,SRCCOPY);
     }
     EndPaint(window,&paint);
 }
@@ -789,19 +1389,25 @@ void draw_square_button(const DRAWITEMSTRUCT* item) {
     bool pressed=(item->itemState&ODS_SELECTED)!=0;
     int id=static_cast<int>(item->CtlID);
 
+    // Owner-drawn BUTTON 的未绘制区域会保留系统按钮底色。先把父窗口在
+    // 对应位置的背景绘入控件 DC，圆角之外才能真正透出背景图。
+    POINT control_origin={0,0};
+    ClientToScreen(item->hwndItem,&control_origin);
+    ScreenToClient(main_window,&control_origin);
+    if (ensure_main_background_buffer(main_window,item->hDC)) {
+        BitBlt(
+            item->hDC,0,0,bounds.right-bounds.left,bounds.bottom-bounds.top,
+            main_background_dc,control_origin.x,control_origin.y,SRCCOPY
+        );
+    }
+
     COLORREF fill=pressed ? RGB(55,91,128) : RGB(67,112,158);
-    COLORREF border=RGB(190,210,235);
-    int border_width=std::max(1,static_cast<int>(std::lround(2*current_scale)));
     Gdiplus::Image* button_image=nullptr;
 
     if (id>=ID_PRESET_BASE && id<ID_PRESET_BASE+5) {
         int preset=id-ID_PRESET_BASE;
         fill=preset_color(preset,pressed);
         button_image=emotion_images[static_cast<std::size_t>(preset)].get();
-        if (slot_presets[active_slot]==preset) {
-            border=RGB(255,255,255);
-            border_width=std::max(2,static_cast<int>(std::lround(4*current_scale)));
-        }
     }
     else if (id>=ID_SLOT_BASE && id<ID_SLOT_BASE+4) {
         int position=id-ID_SLOT_BASE;
@@ -809,45 +1415,43 @@ void draw_square_button(const DRAWITEMSTRUCT* item) {
         int preset=slot_presets[static_cast<std::size_t>(position)];
         if (preset>=0 && preset<5) {
             button_image=emotion_images[static_cast<std::size_t>(preset)].get();
+            fill=preset_color(preset,pressed);
         }
-        border=position==active_slot ? RGB(245,214,118) : RGB(160,170,190);
-        border_width=position==active_slot
-            ? std::max(2,static_cast<int>(std::lround(4*current_scale)))
-            : std::max(1,static_cast<int>(std::lround(2*current_scale)));
     }
     else if (id==ID_SETTINGS) {
         fill=pressed ? RGB(80,69,112) : RGB(105,88,145);
     }
     else if (id==ID_GENERATE) {
         fill=pressed ? RGB(44,116,87) : RGB(55,151,111);
-        border=RGB(190,244,216);
     }
-
-    HBRUSH fill_brush=CreateSolidBrush(fill);
-    HPEN border_pen=CreatePen(PS_SOLID,border_width,border);
-    HGDIOBJ old_brush=SelectObject(item->hDC,fill_brush);
-    HGDIOBJ old_pen=SelectObject(item->hDC,border_pen);
-    Rectangle(item->hDC,bounds.left,bounds.top,bounds.right,bounds.bottom);
-    SelectObject(item->hDC,old_pen);
-    SelectObject(item->hDC,old_brush);
-    DeleteObject(border_pen);
-    DeleteObject(fill_brush);
 
     if (button_image) {
         Gdiplus::Graphics graphics(item->hDC);
         graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-        int inset=std::max(border_width,1);
-        int image_width=std::max(
-            1,static_cast<int>(bounds.right-bounds.left)-2*inset
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        int image_width=std::max(1,static_cast<int>(bounds.right-bounds.left));
+        int image_height=std::max(1,static_cast<int>(bounds.bottom-bounds.top));
+        Gdiplus::GraphicsPath clip_path;
+        add_rounded_rectangle(
+            clip_path,
+            Gdiplus::RectF(
+                static_cast<float>(bounds.left),
+                static_cast<float>(bounds.top),
+                static_cast<float>(image_width),static_cast<float>(image_height)
+            ),
+            std::max(7.0f,16.0f*static_cast<float>(current_scale))
         );
-        int image_height=std::max(
-            1,static_cast<int>(bounds.bottom-bounds.top)-2*inset
+        graphics.SetClip(&clip_path);
+        Gdiplus::SolidBrush image_background(
+            Gdiplus::Color(
+                255,GetRValue(fill),GetGValue(fill),GetBValue(fill)
+            )
         );
+        graphics.FillPath(&image_background,&clip_path);
         graphics.DrawImage(
             button_image,
             Gdiplus::Rect(
-                bounds.left+inset,bounds.top+inset,
-                image_width,image_height
+                bounds.left,bounds.top,image_width,image_height
             ),
             0,0,static_cast<INT>(button_image->GetWidth()),
             static_cast<INT>(button_image->GetHeight()),Gdiplus::UnitPixel
@@ -860,18 +1464,20 @@ void draw_square_button(const DRAWITEMSTRUCT* item) {
                 static_cast<INT>(bounds.bottom-bounds.top)
             );
         }
-    }
-
-    if (button_image) {
-        HPEN image_border=CreatePen(PS_SOLID,border_width,border);
-        HGDIOBJ old_image_pen=SelectObject(item->hDC,image_border);
-        HGDIOBJ old_image_brush=SelectObject(item->hDC,GetStockObject(NULL_BRUSH));
-        Rectangle(item->hDC,bounds.left,bounds.top,bounds.right,bounds.bottom);
-        SelectObject(item->hDC,old_image_brush);
-        SelectObject(item->hDC,old_image_pen);
-        DeleteObject(image_border);
+        graphics.ResetClip();
         return;
     }
+
+    HBRUSH fill_brush=CreateSolidBrush(fill);
+    HGDIOBJ old_brush=SelectObject(item->hDC,fill_brush);
+    HGDIOBJ old_pen=SelectObject(item->hDC,GetStockObject(NULL_PEN));
+    int corner=std::max(14,static_cast<int>(std::lround(32*current_scale)));
+    RoundRect(
+        item->hDC,bounds.left,bounds.top,bounds.right,bounds.bottom,corner,corner
+    );
+    SelectObject(item->hDC,old_pen);
+    SelectObject(item->hDC,old_brush);
+    DeleteObject(fill_brush);
 
     wchar_t text[128]={};
     GetWindowTextW(item->hwndItem,text,128);
@@ -951,6 +1557,354 @@ void enforce_square_resize(HWND window,WPARAM edge,RECT* proposed) {
     }
 }
 
+const std::array<std::size_t,5> RADAR_TO_WEIGHT={{
+    static_cast<std::size_t>(ncnl::ProgressionWeight::common_tone),
+    static_cast<std::size_t>(ncnl::ProgressionWeight::root_motion),
+    static_cast<std::size_t>(ncnl::ProgressionWeight::tonal_attraction),
+    static_cast<std::size_t>(ncnl::ProgressionWeight::modal_consistency),
+    static_cast<std::size_t>(ncnl::ProgressionWeight::voice_leading),
+}};
+
+const std::array<Gdiplus::PointF,5> RADAR_VERTICES={{
+    Gdiplus::PointF(395.0f,86.0f),
+    Gdiplus::PointF(675.0f,271.0f),
+    Gdiplus::PointF(587.0f,639.0f),
+    // 原图“调式一致性”的轴端点更靠左下，位于外层粗线的实际顶角。
+    Gdiplus::PointF(290.0f,654.0f),
+    Gdiplus::PointF(118.0f,271.0f),
+}};
+const Gdiplus::PointF RADAR_CENTER(400.0f,375.0f);
+
+struct ConfigurationTransform {
+    float scale;
+    float offset_x;
+    float offset_y;
+};
+
+ConfigurationTransform configuration_transform(HWND window) {
+    RECT client{};
+    GetClientRect(window,&client);
+    float width=static_cast<float>(client.right-client.left);
+    float height=static_cast<float>(client.bottom-client.top);
+    float scale=std::max(0.25f,std::min(
+        width/SETTINGS_DESIGN_SIZE,height/SETTINGS_DESIGN_SIZE
+    ));
+    return {
+        scale,
+        (width-SETTINGS_DESIGN_SIZE*scale)/2.0f,
+        (height-SETTINGS_DESIGN_SIZE*scale)/2.0f,
+    };
+}
+
+Gdiplus::PointF configuration_logical_point(HWND window,LPARAM l_param) {
+    ConfigurationTransform transform=configuration_transform(window);
+    return Gdiplus::PointF(
+        (GET_X_LPARAM(l_param)-transform.offset_x)/transform.scale,
+        (GET_Y_LPARAM(l_param)-transform.offset_y)/transform.scale
+    );
+}
+
+Gdiplus::PointF radar_point(int axis) {
+    const auto& weights=ncnl::progression_weights().values;
+    double value=weights[RADAR_TO_WEIGHT[static_cast<std::size_t>(axis)]];
+    const Gdiplus::PointF& vertex=RADAR_VERTICES[static_cast<std::size_t>(axis)];
+    return Gdiplus::PointF(
+        RADAR_CENTER.X+static_cast<float>((vertex.X-RADAR_CENTER.X)*value),
+        RADAR_CENTER.Y+static_cast<float>((vertex.Y-RADAR_CENTER.Y)*value)
+    );
+}
+
+bool point_in_logical_rect(
+    const Gdiplus::PointF& point,float x,float y,float width,float height
+) {
+    return point.X>=x && point.X<=x+width && point.Y>=y && point.Y<=y+height;
+}
+
+void draw_configuration_contents(HWND window,HDC dc) {
+    RECT client{};
+    GetClientRect(window,&client);
+    int width=client.right-client.left;
+    int height=client.bottom-client.top;
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    Gdiplus::LinearGradientBrush background(
+        Gdiplus::Point(0,0),Gdiplus::Point(width,height),
+        Gdiplus::Color(255,23,29,43),Gdiplus::Color(255,56,44,76)
+    );
+    graphics.FillRectangle(&background,0,0,width,height);
+
+    ConfigurationTransform transform=configuration_transform(window);
+    Gdiplus::GraphicsState state=graphics.Save();
+    graphics.TranslateTransform(transform.offset_x,transform.offset_y);
+    graphics.ScaleTransform(transform.scale,transform.scale);
+
+    if (configuration_tab==0) {
+        if (pentagon_image) {
+            graphics.DrawImage(
+                pentagon_image.get(),Gdiplus::RectF(70.0f,20.0f,660.0f,660.0f),
+                0.0f,0.0f,static_cast<float>(pentagon_image->GetWidth()),
+                static_cast<float>(pentagon_image->GetHeight()),Gdiplus::UnitPixel
+            );
+        }
+        Gdiplus::Pen axis_pen(Gdiplus::Color(165,91,111,132),1.5f);
+        for (const auto& vertex:RADAR_VERTICES) {
+            graphics.DrawLine(&axis_pen,RADAR_CENTER,vertex);
+        }
+
+        std::array<Gdiplus::PointF,5> points;
+        for (int axis=0;axis<5;++axis) {
+            points[static_cast<std::size_t>(axis)]=radar_point(axis);
+        }
+        Gdiplus::GraphicsPath polygon;
+        polygon.AddPolygon(points.data(),static_cast<INT>(points.size()));
+        Gdiplus::SolidBrush polygon_fill(Gdiplus::Color(51,92,205,238));
+        Gdiplus::Pen polygon_edge(Gdiplus::Color(230,126,226,250),2.5f);
+        graphics.FillPath(&polygon_fill,&polygon);
+        graphics.DrawPath(&polygon_edge,&polygon);
+
+        Gdiplus::SolidBrush point_fill(Gdiplus::Color(255,224,249,255));
+        Gdiplus::Pen point_edge(Gdiplus::Color(255,36,127,166),2.0f);
+        for (int axis=0;axis<5;++axis) {
+            const auto& point=points[static_cast<std::size_t>(axis)];
+            graphics.FillEllipse(&point_fill,point.X-8.0f,point.Y-8.0f,16.0f,16.0f);
+            graphics.DrawEllipse(&point_edge,point.X-8.0f,point.Y-8.0f,16.0f,16.0f);
+        }
+    }
+    else {
+        draw_centered_text(
+            graphics,L"外观与背景",Gdiplus::RectF(120.0f,110.0f,560.0f,70.0f),
+            34.0f,true
+        );
+        draw_centered_text(
+            graphics,L"背景图片将居中裁切为 1:1，并缓存至 assets/bg.png",
+            Gdiplus::RectF(90.0f,205.0f,620.0f,60.0f),22.0f,false
+        );
+        Gdiplus::RectF button_bounds(230.0f,310.0f,340.0f,78.0f);
+        Gdiplus::GraphicsPath button_path;
+        add_rounded_rectangle(button_path,button_bounds,16.0f);
+        Gdiplus::SolidBrush button_fill(Gdiplus::Color(235,80,115,160));
+        Gdiplus::Pen button_edge(Gdiplus::Color(255,178,218,242),2.0f);
+        graphics.FillPath(&button_fill,&button_path);
+        graphics.DrawPath(&button_edge,&button_path);
+        draw_centered_text(graphics,L"选择 PNG 背景图",button_bounds,23.0f,true);
+    }
+
+    const std::array<std::wstring,2> tab_titles={{
+        L"和弦行进逻辑参数调整",L"外观设置"
+    }};
+    for (int tab=0;tab<2;++tab) {
+        Gdiplus::RectF bounds(35.0f+370.0f*tab,724.0f,360.0f,55.0f);
+        Gdiplus::GraphicsPath path;
+        add_rounded_rectangle(path,bounds,13.0f);
+        Gdiplus::SolidBrush fill(
+            tab==configuration_tab
+                ? Gdiplus::Color(245,57,142,181)
+                : Gdiplus::Color(220,49,56,76)
+        );
+        Gdiplus::Pen edge(Gdiplus::Color(230,170,207,230),1.5f);
+        graphics.FillPath(&fill,&path);
+        graphics.DrawPath(&edge,&path);
+        draw_centered_text(graphics,tab_titles[tab],bounds,18.0f,tab==configuration_tab);
+    }
+    graphics.Restore(state);
+}
+
+void paint_configuration_window(HWND window) {
+    PAINTSTRUCT paint{};
+    HDC dc=BeginPaint(window,&paint);
+    RECT client{};
+    GetClientRect(window,&client);
+    int width=client.right-client.left;
+    int height=client.bottom-client.top;
+    if (width>0 && height>0) {
+        HDC buffer=CreateCompatibleDC(dc);
+        HBITMAP bitmap=CreateCompatibleBitmap(dc,width,height);
+        HGDIOBJ old_bitmap=SelectObject(buffer,bitmap);
+        draw_configuration_contents(window,buffer);
+        BitBlt(dc,0,0,width,height,buffer,0,0,SRCCOPY);
+        SelectObject(buffer,old_bitmap);
+        DeleteObject(bitmap);
+        DeleteDC(buffer);
+    }
+    EndPaint(window,&paint);
+}
+
+int nearest_radar_axis(const Gdiplus::PointF& point) {
+    int nearest=-1;
+    float best_distance=22.0f*22.0f;
+    for (int axis=0;axis<5;++axis) {
+        Gdiplus::PointF handle=radar_point(axis);
+        float dx=point.X-handle.X;
+        float dy=point.Y-handle.Y;
+        float distance=dx*dx+dy*dy;
+        if (distance<=best_distance) {
+            best_distance=distance;
+            nearest=axis;
+        }
+    }
+    if (nearest>=0) {
+        return nearest;
+    }
+
+    // 当若干权重为 0 时，它们的点会重叠在中心；此时也允许直接点击
+    // 对应轴线来选中该维度，避免零权重点无法再次被单独拉出。
+    best_distance=18.0f*18.0f;
+    for (int axis=0;axis<5;++axis) {
+        const auto& vertex=RADAR_VERTICES[static_cast<std::size_t>(axis)];
+        float axis_x=vertex.X-RADAR_CENTER.X;
+        float axis_y=vertex.Y-RADAR_CENTER.Y;
+        float length_squared=axis_x*axis_x+axis_y*axis_y;
+        float projection=((point.X-RADAR_CENTER.X)*axis_x+
+                          (point.Y-RADAR_CENTER.Y)*axis_y)/length_squared;
+        if (projection<0.08f || projection>1.05f) {
+            continue;
+        }
+        float projected_x=RADAR_CENTER.X+projection*axis_x;
+        float projected_y=RADAR_CENTER.Y+projection*axis_y;
+        float dx=point.X-projected_x;
+        float dy=point.Y-projected_y;
+        float distance=dx*dx+dy*dy;
+        if (distance<best_distance) {
+            best_distance=distance;
+            nearest=axis;
+        }
+    }
+    return nearest;
+}
+
+void update_dragged_weight(HWND window,const Gdiplus::PointF& point) {
+    if (dragged_weight_axis<0 || dragged_weight_axis>=5) {
+        return;
+    }
+    const Gdiplus::PointF& vertex=
+        RADAR_VERTICES[static_cast<std::size_t>(dragged_weight_axis)];
+    float axis_x=vertex.X-RADAR_CENTER.X;
+    float axis_y=vertex.Y-RADAR_CENTER.Y;
+    double value=((point.X-RADAR_CENTER.X)*axis_x+
+                  (point.Y-RADAR_CENTER.Y)*axis_y)/
+                 (axis_x*axis_x+axis_y*axis_y);
+    ncnl::adjust_progression_weight(
+        RADAR_TO_WEIGHT[static_cast<std::size_t>(dragged_weight_axis)],value
+    );
+    recalculate_progression_quality();
+    main_background_dirty=true;
+    InvalidateRect(main_window,nullptr,FALSE);
+    InvalidateRect(window,nullptr,FALSE);
+}
+
+LRESULT CALLBACK configuration_window_procedure(
+    HWND window,UINT message,WPARAM w_param,LPARAM l_param
+) {
+    switch (message) {
+    case WM_SIZING:
+        enforce_square_resize(window,w_param,reinterpret_cast<RECT*>(l_param));
+        return TRUE;
+    case WM_ENTERSIZEMOVE:
+        configuration_interactive_resize=true;
+        return 0;
+    case WM_EXITSIZEMOVE:
+        configuration_interactive_resize=false;
+        InvalidateRect(window,nullptr,FALSE);
+        return 0;
+    case WM_GETMINMAXINFO: {
+        auto* info=reinterpret_cast<MINMAXINFO*>(l_param);
+        RECT desired={0,0,MIN_CLIENT_SIZE,MIN_CLIENT_SIZE};
+        DWORD style=static_cast<DWORD>(GetWindowLongPtrW(window,GWL_STYLE));
+        DWORD ex_style=static_cast<DWORD>(GetWindowLongPtrW(window,GWL_EXSTYLE));
+        AdjustWindowRectEx(&desired,style,FALSE,ex_style);
+        info->ptMinTrackSize.x=desired.right-desired.left;
+        info->ptMinTrackSize.y=desired.bottom-desired.top;
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        paint_configuration_window(window);
+        return 0;
+    case WM_LBUTTONDOWN: {
+        Gdiplus::PointF point=configuration_logical_point(window,l_param);
+        if (point_in_logical_rect(point,35.0f,724.0f,360.0f,55.0f)) {
+            configuration_tab=0;
+            InvalidateRect(window,nullptr,FALSE);
+            return 0;
+        }
+        if (point_in_logical_rect(point,405.0f,724.0f,360.0f,55.0f)) {
+            configuration_tab=1;
+            InvalidateRect(window,nullptr,FALSE);
+            return 0;
+        }
+        if (configuration_tab==1 &&
+            point_in_logical_rect(point,230.0f,310.0f,340.0f,78.0f)) {
+            choose_background(window);
+            return 0;
+        }
+        if (configuration_tab==0) {
+            dragged_weight_axis=nearest_radar_axis(point);
+            if (dragged_weight_axis>=0) {
+                SetCapture(window);
+                update_dragged_weight(window,point);
+                return 0;
+            }
+        }
+        break;
+    }
+    case WM_MOUSEMOVE:
+        if (dragged_weight_axis>=0 && GetCapture()==window) {
+            update_dragged_weight(window,configuration_logical_point(window,l_param));
+            return 0;
+        }
+        break;
+    case WM_LBUTTONUP:
+        if (dragged_weight_axis>=0) {
+            update_dragged_weight(window,configuration_logical_point(window,l_param));
+            dragged_weight_axis=-1;
+            if (GetCapture()==window) {
+                ReleaseCapture();
+            }
+            ncnl::save_progression_config(progression_config_path);
+            return 0;
+        }
+        break;
+    case WM_CAPTURECHANGED:
+        if (dragged_weight_axis>=0) {
+            dragged_weight_axis=-1;
+            ncnl::save_progression_config(progression_config_path);
+        }
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(window);
+        return 0;
+    case WM_DESTROY:
+        ncnl::save_progression_config(progression_config_path);
+        configuration_window=nullptr;
+        return 0;
+    }
+    return DefWindowProcW(window,message,w_param,l_param);
+}
+
+void open_configuration_window(HWND owner) {
+    if (configuration_window) {
+        ShowWindow(configuration_window,SW_RESTORE);
+        SetForegroundWindow(configuration_window);
+        return;
+    }
+    DWORD style=WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX;
+    RECT size={0,0,SETTINGS_DESIGN_SIZE,SETTINGS_DESIGN_SIZE};
+    AdjustWindowRectEx(&size,style,FALSE,0);
+    configuration_window=CreateWindowExW(
+        0,L"NoChordNoLifeConfigurationWindow",L"NoChordNoLife 配置",
+        style,CW_USEDEFAULT,CW_USEDEFAULT,size.right-size.left,size.bottom-size.top,
+        owner,nullptr,GetModuleHandleW(nullptr),nullptr
+    );
+    if (!configuration_window) {
+        MessageBoxW(owner,L"无法创建配置窗口。",L"配置",MB_OK|MB_ICONERROR);
+        return;
+    }
+    ShowWindow(configuration_window,SW_SHOW);
+    UpdateWindow(configuration_window);
+}
+
 LRESULT CALLBACK window_procedure(
     HWND window,
     UINT message,
@@ -960,6 +1914,17 @@ LRESULT CALLBACK window_procedure(
     switch (message) {
     case WM_CREATE: {
         main_window=window;
+        chord_editor=CreateWindowExW(
+            0,L"EDIT",L"",
+            WS_CHILD|WS_BORDER|ES_CENTER|ES_AUTOHSCROLL,
+            0,0,1,1,window,nullptr,GetModuleHandleW(nullptr),nullptr
+        );
+        chord_editor_procedure_original=reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(
+                chord_editor,GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(chord_editor_procedure)
+            )
+        );
         create_control(
             L"STATIC",L"当前调式：C Ionian",
             WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
@@ -992,11 +1957,15 @@ LRESULT CALLBACK window_procedure(
             );
         }
 
-        create_control(
-            L"STATIC",L"拖动上方情感图片到下方和弦方框；右键方框可清空",
-            WS_CHILD|WS_VISIBLE|SS_CENTER,
-            180,252,640,28,window,0,FontKind::hint
-        );
+        for (int position=0;position<4;++position) {
+            chord_header_targets[position]=create_control(
+                L"STATIC",L"",
+                WS_CHILD|WS_VISIBLE|SS_NOTIFY,
+                132+static_cast<int>(std::lround(204.5*position)),
+                295,205,52,window,
+                ID_CHORD_HEADER_BASE+position,FontKind::card
+            );
+        }
 
         for (int position=0;position<4;++position) {
             int x=SLOT_X[static_cast<std::size_t>(position)];
@@ -1024,12 +1993,64 @@ LRESULT CALLBACK window_procedure(
         return 0;
     }
 
+    case WM_LBUTTONDBLCLK: {
+        POINT point={GET_X_LPARAM(l_param),GET_Y_LPARAM(l_param)};
+        int position=piano_header_at_client_point(window,point);
+        if (position>=0) {
+            begin_chord_edit(window,position);
+            return 0;
+        }
+        break;
+    }
+
+    case WM_LBUTTONDOWN: {
+        if (editing_chord>=0) {
+            commit_chord_editor(false);
+        }
+        POINT point={GET_X_LPARAM(l_param),GET_Y_LPARAM(l_param)};
+        if (begin_midi_note_drag(window,point)) {
+            return 0;
+        }
+        break;
+    }
+
+    case WM_MOUSEMOVE:
+        if (dragged_midi_position>=0) {
+            POINT point={GET_X_LPARAM(l_param),GET_Y_LPARAM(l_param)};
+            update_midi_note_drag(window,point);
+            return 0;
+        }
+        break;
+
+    case WM_LBUTTONUP:
+        if (dragged_midi_position>=0) {
+            POINT point={GET_X_LPARAM(l_param),GET_Y_LPARAM(l_param)};
+            end_midi_note_drag(window,point);
+            return 0;
+        }
+        break;
+
+    case WM_CAPTURECHANGED:
+        if (dragged_midi_position>=0) {
+            dragged_midi_position=-1;
+            dragged_midi_pitch=-1;
+        }
+        return 0;
+
+    case WM_CLEAR_CHORD_HOVER: {
+        POINT point={GET_X_LPARAM(l_param),GET_Y_LPARAM(l_param)};
+        clear_chord_at_client_point(window,point);
+        return 0;
+    }
+
     case WM_SIZING:
         enforce_square_resize(window,w_param,reinterpret_cast<RECT*>(l_param));
         return TRUE;
 
     case WM_ENTERSIZEMOVE:
+        commit_chord_editor(false);
         interactive_resize=true;
+        main_background_dirty=true;
         return 0;
 
     case WM_SIZE:
@@ -1040,6 +2061,7 @@ LRESULT CALLBACK window_procedure(
 
     case WM_EXITSIZEMOVE:
         interactive_resize=false;
+        main_background_dirty=true;
         if (!controls.empty()) {
             apply_layout(window);
         }
@@ -1103,6 +2125,16 @@ LRESULT CALLBACK window_procedure(
     case WM_COMMAND: {
         int id=LOWORD(w_param);
         int notification=HIWORD(w_param);
+        if (editing_chord>=0 &&
+            reinterpret_cast<HWND>(l_param)!=chord_editor &&
+            !commit_chord_editor(true)) {
+            return 0;
+        }
+        if (id>=ID_CHORD_HEADER_BASE && id<ID_CHORD_HEADER_BASE+4 &&
+            notification==STN_DBLCLK) {
+            begin_chord_edit(window,id-ID_CHORD_HEADER_BASE);
+            return 0;
+        }
         if (id>=ID_SLOT_BASE && id<ID_SLOT_BASE+4 && notification==BN_CLICKED) {
             active_slot=id-ID_SLOT_BASE;
             update_slot_ui();
@@ -1118,13 +2150,15 @@ LRESULT CALLBACK window_procedure(
             return 0;
         }
         if (id==ID_SETTINGS && notification==BN_CLICKED) {
-            choose_background(window);
+            open_configuration_window(window);
             return 0;
         }
         break;
     }
 
     case WM_DESTROY:
+        stop_midi_playback();
+        destroy_main_background_buffer();
         PostQuitMessage(0);
         return 0;
     }
@@ -1149,11 +2183,17 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
     }
 
     background_path=executable_directory()+L"\\assets\\bg.png";
+    progression_config_path=wide_to_utf8(executable_directory()+L"\\config.json");
+    if (!ncnl::load_progression_config(progression_config_path)) {
+        ncnl::set_progression_weights(ncnl::default_progression_weights());
+        ncnl::save_progression_config(progression_config_path);
+    }
     load_background(background_path);
     load_interface_images();
 
     const wchar_t CLASS_NAME[]=L"NoChordNoLifeGeneratorWindow";
     WNDCLASSW window_class{};
+    window_class.style=CS_DBLCLKS;
     window_class.lpfnWndProc=window_procedure;
     window_class.hInstance=instance;
     window_class.lpszClassName=CLASS_NAME;
@@ -1161,6 +2201,18 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
     window_class.hbrBackground=nullptr;
 
     if (!RegisterClassW(&window_class)) {
+        Gdiplus::GdiplusShutdown(gdiplus_token);
+        return 1;
+    }
+
+    WNDCLASSW configuration_class{};
+    configuration_class.style=CS_DBLCLKS;
+    configuration_class.lpfnWndProc=configuration_window_procedure;
+    configuration_class.hInstance=instance;
+    configuration_class.lpszClassName=L"NoChordNoLifeConfigurationWindow";
+    configuration_class.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    configuration_class.hbrBackground=nullptr;
+    if (!RegisterClassW(&configuration_class)) {
         Gdiplus::GdiplusShutdown(gdiplus_token);
         return 1;
     }
@@ -1188,12 +2240,40 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
 
     MSG message{};
     while (GetMessageW(&message,nullptr,0,0)>0) {
+        bool first_key_press=(message.lParam&(1LL<<30))==0;
+        bool editing=message.hwnd==chord_editor || GetFocus()==chord_editor;
+        bool main_window_key=GetAncestor(message.hwnd,GA_ROOT)==main_window;
+        if (main_window_key &&
+            (message.message==WM_RBUTTONDOWN || message.message==WM_MOUSEMOVE) &&
+            (GetAsyncKeyState(VK_RBUTTON)&0x8000)!=0) {
+            POINT point=message.pt;
+            ScreenToClient(main_window,&point);
+            SendMessageW(
+                main_window,WM_CLEAR_CHORD_HOVER,0,
+                MAKELPARAM(point.x,point.y)
+            );
+        }
+        if (message.message==WM_KEYDOWN && first_key_press && !editing &&
+            main_window_key) {
+            if (message.wParam==VK_SPACE) {
+                toggle_midi_playback(window);
+                continue;
+            }
+            if (message.wParam==VK_RETURN) {
+                SendMessageW(
+                    window,WM_COMMAND,MAKEWPARAM(ID_GENERATE,BN_CLICKED),
+                    reinterpret_cast<LPARAM>(generate_button)
+                );
+                continue;
+            }
+        }
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
 
     background_image.reset();
     arrow_image.reset();
+    pentagon_image.reset();
     for (auto& image:emotion_images) {
         image.reset();
     }

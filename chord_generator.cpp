@@ -201,7 +201,7 @@ GeneratedProgression generate_progression(
     constexpr int SAMPLE_COUNT=6000;
     std::vector<Trial> trials;
     trials.reserve(SAMPLE_COUNT);
-    std::array<std::map<std::pair<unsigned int,unsigned int>,double>,3>
+    std::array<std::map<std::pair<unsigned int,unsigned int>,double>,4>
         transition_cache;
 
     for (int sample=0;sample<SAMPLE_COUNT;++sample) {
@@ -215,9 +215,11 @@ GeneratedProgression generate_progression(
 
         double transition_total=0.0;
         int repeated_chords=0;
-        for (int position=0;position<3;++position) {
+        for (int position=0;position<4;++position) {
             const Candidate& current=pools[position][trial.choices[position]];
-            const Candidate& next=pools[position+1][trial.choices[position+1]];
+            int next_position=(position+1)%4;
+            const Candidate& next=
+                pools[next_position][trial.choices[next_position]];
             auto key=std::make_pair(current.pitch_mask,next.pitch_mask);
             auto cached=transition_cache[position].find(key);
             if (cached==transition_cache[position].end()) {
@@ -229,8 +231,8 @@ GeneratedProgression generate_progression(
             transition_total+=cached->second;
             repeated_chords+=current.pitch_mask==next.pitch_mask;
         }
-        // 原进行分数偏爱完全静止；生成层轻度惩罚连续重复，避免四个位置反复同一和弦。
-        trial.quality=transition_total/3.0-14.0*repeated_chords;
+        // 循环进行包含 4→1；生成层轻度惩罚连续重复，避免首尾或内部反复同一和弦。
+        trial.quality=transition_total/4.0-14.0*repeated_chords;
         trials.push_back(trial);
     }
 

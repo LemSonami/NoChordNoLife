@@ -1,4 +1,5 @@
 #include "chord_algorithms.hpp"
+#include "progression_config.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -427,13 +428,19 @@ double chord_progression_score(
         mode.intervals
     );
 
-    // 最终加权
+    // 最终加权（配置中的五项权重始终归一化为 1）
+    const auto& weights=progression_weights().values;
     double final_score=100.0*(
-        0.45*voice_leading_score
-        +0.15*common_tone_score
-        +0.15*modal_score
-        +0.10*harmonic_root_score
-        +0.15*resolution_score);
+        weights[static_cast<std::size_t>(ProgressionWeight::voice_leading)]*
+            voice_leading_score
+        +weights[static_cast<std::size_t>(ProgressionWeight::common_tone)]*
+            common_tone_score
+        +weights[static_cast<std::size_t>(ProgressionWeight::modal_consistency)]*
+            modal_score
+        +weights[static_cast<std::size_t>(ProgressionWeight::root_motion)]*
+            harmonic_root_score
+        +weights[static_cast<std::size_t>(ProgressionWeight::tonal_attraction)]*
+            resolution_score);
     return std::max(0.0,std::min(100.0,final_score));
 }
 
