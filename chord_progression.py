@@ -49,251 +49,156 @@ CHORD_TEMPLATES = {
 }
 
 
-# ============================================================
-# 2. 输入解析
-# ============================================================
-
+# 将str型升降记号映射到int型pitch-class的±1，取模12
 def parse_note(note: str) -> int:
-    """
-    音名转为 pitch class:
-    C=0, C#=1, Db=1 ... B=11
-
-    格式严格：
-    C
-    C#
-    Db
-    F#
-    Eb
-    """
     if not re.fullmatch(r"[A-G](?:#|b)?", note):
         raise ValueError(
             f"你好坏！这是非法音名: {note!r}。"
             f"必须形如 C C# Db 喔，且音名字母必须大写捏~"
         )
-
     pc = NATURAL_PC[note[0]]
-
     if len(note) == 2:
         if note[1] == "#":
             pc += 1
         elif note[1] == "b":
             pc -= 1
-
     return pc % 12
 
 
+# 将调式输入拆分为主音和调式名称
 def parse_mode(mode_string: str):
-    """
-    例如：
-        C Ionian
-        D Dorian
-        F# Lydian
-        Eb Mixolydian
-    """
-
     parts = mode_string.split()
-
     if len(parts) != 2:
         raise ValueError(
-            "调式必须写成类似 'C Ionian' 的格式。"
+            "调式必须写成类似于 C Ionian 的格式捏~（中间用空格分开）"
         )
-
     tonic_name, mode_name = parts
-
     tonic = parse_note(tonic_name)
-
     if mode_name not in MODE_INTERVALS:
         raise ValueError(
-            "调式名称必须严格为以下七种之一：\n"
+            "调式名称必须严格为以下七种之一捏：\n"
             "Ionian, Dorian, Phrygian, Lydian, "
             "Mixolydian, Aeolian, Locrian"
         )
-
     return tonic, mode_name, MODE_INTERVALS[mode_name]
 
 
+# 和弦内音拆分为pitch-class列表（音级关系去重+检测）
 def parse_chord(chord_string: str):
-    """
-    例如：
-        C E G
-        C Eb G
-        C D# G
-        G B D F
-    """
-
     notes = chord_string.split()
-
     if len(notes) < 2:
-        raise ValueError("和弦至少需要两个不同音。")
-
+        raise ValueError("只有一个音不能算和弦喵！哈！！！")
     pcs = [parse_note(note) for note in notes]
-
-    # pitch-class 模型不考虑八度重复。
-    # C E G C 等效为 C E G。
+    # 忽略八度重复带来的影响
+    # 例如：C E G C 等效为 C E G
     pcs = list(dict.fromkeys(pcs))
-
     if len(pcs) < 2:
-        raise ValueError("和弦至少需要两个不同的音级。")
-
+        raise ValueError("只有一个音不能算和弦喵！哈！！！")
     return pcs
 
 
-# ============================================================
-# 3. 音级距离
-# ============================================================
-
+# 3. 音级距离（作差取绝对值）
 def pitch_class_distance(a: int, b: int) -> int:
     """
-    十二平均律圆上的最短距离。
-
+    十二平均律圈（而非五度圈）的最短距离。
     例如：
         C -> C# = 1
         C -> B  = 1
         C -> G  = 5
-        C -> F# = 6
     """
     d = abs(a - b) % 12
     return min(d, 12 - d)
 
 
-# ============================================================
-# 4. 最小 Voice-Leading Distance
-# ============================================================
-
+# 动态规划计算两和弦间最小音级移动量之和
 def minimum_voice_leading(chord1, chord2):
     """
-    在所有可能的声部对应关系中寻找总移动量最小的方案。
-
-    使用动态规划而不是暴力全排列。
-
-    返回：
-        total_distance
-        [(source_pc, target_pc), ...]
+    在所有可能的声部对应关系中寻找总移动量最小的方案
+    为减少复杂度，使用动态规划而不是暴力枚举/全排列
     """
-
     source = tuple(chord1)
     target = tuple(chord2)
-
     swapped = False
-
-    # 为减少 DP 状态，让 source 永远是较小的集合
+    # 为减少DP状态，让source永远是较小的集合
     if len(source) > len(target):
         source, target = target, source
         swapped = True
-
     @lru_cache(maxsize=None)
     def dp(i, used_mask):
-
         if i == len(source):
             return 0, ()
-
         best_cost = float("inf")
         best_pairs = ()
-
         for j, target_note in enumerate(target):
-
             if used_mask & (1 << j):
                 continue
-
             d = pitch_class_distance(
                 source[i],
                 target_note
             )
-
             remaining_cost, remaining_pairs = dp(
                 i + 1,
                 used_mask | (1 << j)
             )
-
             total_cost = d + remaining_cost
-
             if swapped:
                 pair = (target_note, source[i])
             else:
                 pair = (source[i], target_note)
-
             if total_cost < best_cost:
                 best_cost = total_cost
                 best_pairs = (pair,) + remaining_pairs
-
         return best_cost, best_pairs
-
     return dp(0, 0)
 
 
-# ============================================================
-# 5. 自动推测和弦根音
-# ============================================================
-
+# 推测和弦根音
 def infer_chord_root(chord):
     """
-    尝试根据常见和弦模板推测根音。
-
+    尝试上面定义的和弦模板（CHORD_TEMPLATES）推测根音
     例如：
         C E G     -> C
         E G C     -> C
         G B D     -> G
         B D F G   -> G（G7）
-
-    如果无法可靠识别，则退回到输入的第一个音。
+    无法可靠识别时，退回到输入的第一个音
     """
-
     chord_set = set(chord)
-
     best = None
-
     for root in chord_set:
-
         relative = {
             (pc - root) % 12
             for pc in chord_set
         }
-
         for template in CHORD_TEMPLATES.values():
+            missing = len(template-relative)
+            extra = len(relative-template)
 
-            missing = len(template - relative)
-            extra = len(relative - template)
-
-            # 缺少模板核心音的惩罚更重
-            error = missing * 2 + extra
+            # 缺少模板核心音的对误差的惩罚更重
+            error = missing*2+extra
 
             candidate = (error, root)
-
             if best is None or candidate < best:
                 best = candidate
-
-    # 误差太大意味着无法可靠识别
+    # 无法可靠识别的判据为，误差（error）太大
     if best is None or best[0] > 2:
         return chord[0]
-
     return best[1]
 
 
-# ============================================================
-# 6. 调式内音级稳定度
-# ============================================================
-
+# 调式一致性检测（调式内音级稳定度）
 def tonal_stability(pc, tonic, mode_intervals):
     """
-    一个简化的 Lerdahl-style tonal hierarchy。
-
-    不是 Lerdahl 原公式的直接复制，
-    而是借用 tonal hierarchy / tonal attraction 的思想。
-
-    1级最稳定
-    5级其次
-    3级再次
-    其他调式内音级较弱
-    调外音最低
+    简化版的 Lerdahl-style tonal hierarchy
+    借用 tonal hierarchy / tonal attraction 的思想
+    例如：1级最稳定，5级其次，3级再次…
+    其他调式内音级较弱，调外音最低
     """
-
     relative_pc = (pc - tonic) % 12
-
     if relative_pc not in mode_intervals:
         return 0.10
-
     degree = mode_intervals.index(relative_pc)
-
+    # 为1级最稳定，7级最不稳定
     stability_by_degree = [
         1.00,   # I
         0.55,   # II
@@ -303,14 +208,10 @@ def tonal_stability(pc, tonic, mode_intervals):
         0.50,   # VI
         0.42,   # VII
     ]
-
     return stability_by_degree[degree]
 
 
-# ============================================================
 # 7. 根音运动评分
-# ============================================================
-
 def root_motion_score(root1, root2):
     """
     对两个根音之间的 interval class 评分。
