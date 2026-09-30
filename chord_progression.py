@@ -3,19 +3,17 @@ import re
 from functools import lru_cache
 
 
-# ============================================================
 # 七种中古调式的十二平均律映射
 # 默认认为，主音=0，主音的高一八度的下一个半音为11
 # 其实采用1~12（而非0~11）更方便人类理解？但是要方便计算机理解的话，还是从0开始吧（
-# ============================================================
 MODE_INTERVALS={
-    "Ionian":     [0,2,4,5,7,9,11],
-    "Dorian":     [0,2,3,5,7,9,10],
-    "Phrygian":   [0,1,3,5,7,8,10],
-    "Lydian":     [0,2,4,6,7,9,11],
-    "Mixolydian": [0,2,4,5,7,9,10],
-    "Aeolian":    [0,2,3,5,7,8,10],
-    "Locrian":    [0,1,3,5,6,8,10],
+    "Ionian":    [0,2,4,5,7,9,11],
+    "Dorian":    [0,2,3,5,7,9,10],
+    "Phrygian":  [0,1,3,5,7,8,10],
+    "Lydian":    [0,2,4,6,7,9,11],
+    "Mixolydian":[0,2,4,5,7,9,10],
+    "Aeolian":   [0,2,3,5,7,8,10],
+    "Locrian":   [0,1,3,5,6,8,10],
 }
 
 # 定义C大调的所有内音（即所有白键）的十二平局律映射
@@ -191,13 +189,13 @@ def tonal_stability(pc,tonic,mode_intervals):
     degree=mode_intervals.index(relative_pc)
     # 为1级最稳定，7级最不稳定
     stability_by_degree=[
-        1.00,   # I
-        0.55,   # II
-        0.75,   # III
-        0.62,   # IV
-        0.88,   # V
-        0.50,   # VI
-        0.42,   # VII
+        1.00,#I
+        0.55,#II
+        0.75,#III
+        0.62,#IV
+        0.88,#V
+        0.50,#VI
+        0.42,#VII
     ]
     return stability_by_degree[degree]
 
@@ -347,4 +345,4 @@ if __name__=="__main__":
         score=chord_progression_score(mode,chord1,chord2)
         print(f"{score:.2f}")
     except ValueError as e:
-        print(f"输入错误: {e}")
+        print(f"{e}")
