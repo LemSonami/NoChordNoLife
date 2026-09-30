@@ -2,4 +2,5 @@ idea/
 .git/
 .vscode/
 __pycache__/
-*.py
+.learnings/
+algorithm/
