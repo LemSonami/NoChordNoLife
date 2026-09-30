@@ -8,7 +8,6 @@ from functools import lru_cache
 # 默认认为，主音=0，主音的高一八度的下一个半音为11
 # 其实采用1~12（而非0~11）更方便人类理解？但是要方便计算机理解的话，还是从0开始吧（
 # ============================================================
-
 MODE_INTERVALS={
     "Ionian":     [0,2,4,5,7,9,11],
     "Dorian":     [0,2,3,5,7,9,10],
@@ -128,16 +127,10 @@ def minimum_voice_leading(chord1, chord2):
         best_cost=float("inf")
         best_pairs=()
         for j,target_note in enumerate(target):
-            if used_mask&(1 << j):
+            if used_mask&(1<<j):
                 continue
-            d=pitch_class_distance(
-                source[i],
-                target_note
-            )
-            remaining_cost,remaining_pairs=dp(
-                i+1,
-                used_mask|(1<<j)
-            )
+            d=pitch_class_distance(source[i],target_note)
+            remaining_cost,remaining_pairs=dp(i+1,used_mask|(1<<j))
             total_cost=d+remaining_cost
             if swapped:
                 pair=(target_note,source[i])
@@ -146,7 +139,7 @@ def minimum_voice_leading(chord1, chord2):
             if total_cost<best_cost:
                 best_cost=total_cost
                 best_pairs=(pair,)+remaining_pairs
-        return best_cost, best_pairs
+        return best_cost,best_pairs
     return dp(0, 0)
 
 
