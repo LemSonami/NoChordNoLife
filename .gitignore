@@ -1,6 +1,5 @@
 idea/
+algorithm/
 .git/
 .vscode/
-__pycache__/
 .learnings/
-algorithm/
