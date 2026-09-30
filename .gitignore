@@ -2,3 +2,4 @@ idea/
 .git/
 .vscode/
 __pycache__/
+*.py
