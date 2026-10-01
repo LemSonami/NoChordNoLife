@@ -1,4 +1,5 @@
 #include "chord_generator.hpp"
+#include "piano_roll_notes.hpp"
 
 #include "chord_algorithms.hpp"
 
@@ -42,7 +43,7 @@ struct Candidate {
 };
 
 struct Trial {
-    std::array<std::size_t,4> choices;
+    std::vector<std::size_t> choices;
     double quality;
 };
 
@@ -124,8 +125,8 @@ Candidate fixed_candidate(
     const ChordConstraint& constraint
 ) {
     std::string notes=normalize_chord_text(constraint.fixed_notes);
-    Chord parsed=parse_chord(notes);
-    double score=chord_emotion_score(mode_string,notes);
+    Chord parsed=parse_roll_notes(notes);
+    double score=roll_emotion_score(mode_string,notes);
     return {notes,score,chord_mask(parsed)};
 }
 
@@ -159,16 +160,24 @@ const char* emotion_preset_label(int preset) {
     return labels[static_cast<std::size_t>(preset)];
 }
 
+bool quality_matches_generation_range(double score) {
+    return score>65.0 && score<90.0;
+}
+
 GeneratedProgression generate_progression(
     const std::string& mode_string,
-    const std::array<ChordConstraint,4>& constraints
+    const std::vector<ChordConstraint>& constraints
 ) {
+    if (constraints.empty()) {
+        throw std::invalid_argument("请先导入节奏或创建和弦分块。");
+    }
+    const std::size_t count=constraints.size();
     // 先让原算法验证调式格式，再构建候选库。
     parse_mode(mode_string);
     std::vector<Candidate> all_candidates=build_candidates(mode_string);
-    std::array<std::vector<Candidate>,4> pools;
+    std::vector<std::vector<Candidate>> pools(count);
 
-    for (int position=0;position<4;++position) {
+    for (std::size_t position=0;position<count;++position) {
         if (!normalize_chord_text(constraints[position].fixed_notes).empty()) {
             pools[position].push_back(
                 fixed_candidate(mode_string,constraints[position])
@@ -201,12 +210,13 @@ GeneratedProgression generate_progression(
     constexpr int SAMPLE_COUNT=6000;
     std::vector<Trial> trials;
     trials.reserve(SAMPLE_COUNT);
-    std::array<std::map<std::pair<unsigned int,unsigned int>,double>,4>
-        transition_cache;
+    // 各分块复用同一衔接缓存，分块数量增加时仍避免重复计算。
+    std::map<std::pair<unsigned int,unsigned int>,double> transition_cache;
 
     for (int sample=0;sample<SAMPLE_COUNT;++sample) {
         Trial trial{};
-        for (int position=0;position<4;++position) {
+        trial.choices.resize(count);
+        for (std::size_t position=0;position<count;++position) {
             std::uniform_int_distribution<std::size_t> choose(
                 0,pools[position].size()-1
             );
@@ -215,50 +225,45 @@ GeneratedProgression generate_progression(
 
         double transition_total=0.0;
         int repeated_chords=0;
-        for (int position=0;position<4;++position) {
+        for (std::size_t position=0;position<count;++position) {
             const Candidate& current=pools[position][trial.choices[position]];
-            int next_position=(position+1)%4;
+            std::size_t next_position=(position+1)%count;
             const Candidate& next=
                 pools[next_position][trial.choices[next_position]];
             auto key=std::make_pair(current.pitch_mask,next.pitch_mask);
-            auto cached=transition_cache[position].find(key);
-            if (cached==transition_cache[position].end()) {
-                double score=chord_progression_score(
+            auto cached=transition_cache.find(key);
+            if (cached==transition_cache.end()) {
+                double score=roll_transition_score(
                     mode_string,current.notes,next.notes
                 );
-                cached=transition_cache[position].insert({key,score}).first;
+                cached=transition_cache.insert({key,score}).first;
             }
             transition_total+=cached->second;
-            repeated_chords+=current.pitch_mask==next.pitch_mask;
+            repeated_chords+=count>1 && current.pitch_mask==next.pitch_mask;
         }
-        // 循环进行包含 4→1；生成层轻度惩罚连续重复，避免首尾或内部反复同一和弦。
-        trial.quality=transition_total/4.0-14.0*repeated_chords;
+        // 循环进行包含尾→头；重复惩罚按分块数量归一化，保持四块时的原行为。
+        trial.quality=transition_total/count-56.0*repeated_chords/count;
         trials.push_back(trial);
     }
 
-    std::sort(
-        trials.begin(),trials.end(),
-        [](const Trial& left,const Trial& right) {
-            return left.quality>right.quality;
-        }
-    );
-
-    std::vector<const Trial*> top_unique;
-    std::set<std::array<std::size_t,4>> seen_progressions;
+    std::vector<const Trial*> eligible_unique;
+    std::set<std::vector<std::size_t>> seen_progressions;
     for (const auto& trial:trials) {
+        if (!quality_matches_generation_range(trial.quality)) { continue; }
         if (seen_progressions.insert(trial.choices).second) {
-            top_unique.push_back(&trial);
-            if (top_unique.size()==30) {
-                break;
-            }
+            eligible_unique.push_back(&trial);
         }
     }
-    std::uniform_int_distribution<std::size_t> choose_top(0,top_unique.size()-1);
-    const Trial& selected=*top_unique[choose_top(random_engine)];
+    if (eligible_unique.empty()) {
+        throw std::runtime_error("此次采样未找到进行质量大于 65 且小于 90 的结果。请调整分块、情感预设或行进权重后重试。");
+    }
+    std::uniform_int_distribution<std::size_t> choose_result(0,eligible_unique.size()-1);
+    const Trial& selected=*eligible_unique[choose_result(random_engine)];
 
     GeneratedProgression result{};
+    result.chords.resize(count);
     result.quality_score=selected.quality;
-    for (int position=0;position<4;++position) {
+    for (std::size_t position=0;position<count;++position) {
         const Candidate& candidate=pools[position][selected.choices[position]];
         result.chords[position]={candidate.notes,candidate.emotion_score};
     }

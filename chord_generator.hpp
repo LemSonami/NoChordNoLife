@@ -2,6 +2,7 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 namespace ncnl {
 
@@ -16,15 +17,24 @@ struct GeneratedChord {
 };
 
 struct GeneratedProgression {
-    std::array<GeneratedChord,4> chords;
+    std::vector<GeneratedChord> chords;
     double quality_score;
 };
 
 bool score_matches_preset(double score,int preset);
+bool quality_matches_generation_range(double score);
 const char* emotion_preset_label(int preset);
 GeneratedProgression generate_progression(
     const std::string& mode_string,
-    const std::array<ChordConstraint,4>& constraints
+    const std::vector<ChordConstraint>& constraints
 );
+
+template<std::size_t N>
+GeneratedProgression generate_progression(
+    const std::string& mode_string,const std::array<ChordConstraint,N>& constraints
+) {
+    return generate_progression(mode_string,
+        std::vector<ChordConstraint>(constraints.begin(),constraints.end()));
+}
 
 }  // namespace ncnl
