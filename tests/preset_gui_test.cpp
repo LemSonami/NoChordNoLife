@@ -16,6 +16,9 @@ int main() {
     assert(bounds.right>bounds.bottom*2);
     SendMessageW(window,WM_COMMAND,MAKEWPARAM(ID_PRESET_ACTION,BN_CLICKED),reinterpret_cast<LPARAM>(button));
     HWND presets=ncnl::preset_library_window(); assert(presets && GetWindow(presets,GW_OWNER)==window);
+    RECT owner_bounds{},preset_bounds{}; GetWindowRect(window,&owner_bounds); GetWindowRect(presets,&preset_bounds);
+    assert(std::abs((owner_bounds.left+owner_bounds.right)-(preset_bounds.left+preset_bounds.right))<=2);
+    assert(std::abs((owner_bounds.top+owner_bounds.bottom)-(preset_bounds.top+preset_bounds.bottom))<=2);
     ShowWindow(presets,SW_HIDE);
     ncnl::MidiRhythm fixture; fixture.length=4;
     fixture.events={{0,0.5,90,{60,64,67}},{1.5,0.25,80,{62}},{2,0.5,90,{65}}};

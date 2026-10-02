@@ -6,6 +6,7 @@
 #endif
 #include "preset_library.hpp"
 #include "midi_rhythm.hpp"
+#include "window_layout.hpp"
 #include <windowsx.h>
 #include <shellapi.h>
 #include <algorithm>
@@ -150,7 +151,8 @@ void PresetStore::recycle(std::size_t index,HWND owner) {
 }
 
 namespace {
-constexpr int LIST_TOP=150,ROW_HEIGHT=72,VISIBLE_ROWS=7;
+constexpr int LIST_TOP=150,ROW_HEIGHT=72,VISIBLE_ROWS=9;
+constexpr int SAVE_Y=875,STATUS_Y=934,FOOTER_Y=968;
 constexpr UINT_PTR SCROLL_TIMER=71;
 constexpr UINT_PTR TRANSITION_TIMER=72;
 struct Library {
@@ -296,7 +298,7 @@ void draw(Gdiplus::Graphics& graphics) {
     text(graphics,L"保留灵感的节奏，让下一次创作从这里开始。",{44,88,770,28},16,Gdiplus::Color(255,157,177,197));
     rounded(graphics,{832,44,120,42},14,Gdiplus::Color(255,50,64,88));
     text(graphics,L"刷新",{832,44,120,42},16,Gdiplus::Color(255,211,230,246),true);
-    rounded(graphics,{30,135,940,545},22,Gdiplus::Color(150,13,21,36));
+    rounded(graphics,{30,135,940,675},22,Gdiplus::Color(150,13,21,36));
     if (library->store->files().empty()) {
         text(graphics,L"这里还没有预设",{140,295,720,70},28,Gdiplus::Color(255,204,225,239),true);
         text(graphics,L"在下方输入名称，保存当前的 MIDI 节奏。",{100,370,800,40},18,Gdiplus::Color(255,145,169,192),true);
@@ -320,16 +322,16 @@ void draw(Gdiplus::Graphics& graphics) {
         }
     }
     std::wostringstream count; count<<library->store->files().size()<<L" 个预设  ·  presents";
-    text(graphics,count.str(),{50,687,900,24},14,Gdiplus::Color(255,154,177,199));
-    text(graphics,L"预设名称",{50,710,600,28},15,Gdiplus::Color(255,187,211,228));
-    rounded(graphics,{674,746,276,50},16,Gdiplus::Color(255,69,149,123));
-    text(graphics,L"＋ 保存当前节奏",{674,746,276,50},20,Gdiplus::Color(255,244,255,250),true);
+    text(graphics,count.str(),{50,815,900,24},14,Gdiplus::Color(255,154,177,199));
+    text(graphics,L"预设名称",{50,842,600,28},15,Gdiplus::Color(255,187,211,228));
+    rounded(graphics,{674,SAVE_Y,276,50},16,Gdiplus::Color(255,69,149,123));
+    text(graphics,L"＋ 保存当前节奏",{674,SAVE_Y,276,50},20,Gdiplus::Color(255,244,255,250),true);
     float status=progress(library->status_started,240);
-    if (status<1) { text(graphics,library->previous_status,{50,897-8*status,900,38},15,
+    if (status<1) { text(graphics,library->previous_status,{50,STATUS_Y-8*status,900,26},15,
         Gdiplus::Color(static_cast<BYTE>(255*(1-status)),189,214,227)); }
-    text(graphics,library->status,{50,897+8*(1-status),900,38},15,
+    text(graphics,library->status,{50,STATUS_Y+8*(1-status),900,26},15,
         Gdiplus::Color(static_cast<BYTE>(255*status),189,214,227));
-    text(graphics,L"双击空白处加载 · 双击名称 / F2 重命名 · 拖动排序 · 右键删除",{50,945,900,28},13,Gdiplus::Color(255,139,165,186));
+    text(graphics,L"双击空白处加载 · 双击名称 / F2 重命名 · 拖动排序 · 右键删除",{50,FOOTER_Y,900,24},13,Gdiplus::Color(255,139,165,186));
 }
 void free_buffer() {
     if (library->cache) { SelectObject(library->cache,library->old); DeleteObject(library->bitmap); DeleteDC(library->cache); }
@@ -343,7 +345,7 @@ void position_renamer() {
 }
 void layout(HWND window) {
     RECT client{}; GetClientRect(window,&client); library->scale=client.right/1000.0;
-    MoveWindow(library->editor,static_cast<int>(50*library->scale),static_cast<int>(746*library->scale),
+    MoveWindow(library->editor,static_cast<int>(50*library->scale),static_cast<int>(SAVE_Y*library->scale),
         static_cast<int>(598*library->scale),static_cast<int>(50*library->scale),TRUE);
     int radius=static_cast<int>(24*library->scale);
     SetWindowRgn(library->editor,CreateRoundRectRgn(0,0,static_cast<int>(598*library->scale)+1,
@@ -422,7 +424,7 @@ LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM w,LPARAM l) {
     case WM_KEYDOWN: if (w==VK_F2) { begin_rename(library->selected); return 0; } break;
     case WM_LBUTTONDOWN: {
         auto point=logical(l);
-        if (in(point,674,746,276,50)) { action(0); return 0; }
+        if (in(point,674,SAVE_Y,276,50)) { action(0); return 0; }
         if (in(point,832,44,120,42)) { action(3); return 0; }
         int row=row_at(point); if (row>=0) {
             select(row);
@@ -533,7 +535,8 @@ void open_preset_library(HWND owner,const std::wstring& directory,const std::wst
         WNDCLASSW type{}; type.style=CS_DBLCLKS; type.lpfnWndProc=procedure; type.hInstance=GetModuleHandleW(nullptr);
         type.lpszClassName=L"NoChordNoLifePresetLibrary"; RegisterClassW(&type);
         DWORD style=WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX; RECT size={0,0,1000,1000}; AdjustWindowRect(&size,style,FALSE);
-        HWND window=CreateWindowExW(WS_EX_LAYERED,type.lpszClassName,L"NoChordNoLife · 节奏预设",style,CW_USEDEFAULT,CW_USEDEFAULT,
+        POINT position=centered_window_position(owner,size.right-size.left,size.bottom-size.top);
+        HWND window=CreateWindowExW(WS_EX_LAYERED,type.lpszClassName,L"NoChordNoLife · 节奏预设",style,position.x,position.y,
             size.right-size.left,size.bottom-size.top,owner,nullptr,type.hInstance,nullptr);
         if (!window) { throw std::runtime_error("无法打开预设管理界面。"); }
         library_feedback.initialize(window,cursors);

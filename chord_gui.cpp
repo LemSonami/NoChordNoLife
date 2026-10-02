@@ -30,6 +30,7 @@
 #include "midi_rhythm.hpp"
 #include "mouse_feedback.hpp"
 #include "preset_library.hpp"
+#include "window_layout.hpp"
 
 int BPM=120;
 
@@ -83,6 +84,7 @@ POINT middle_previous={0,0};
 std::set<std::size_t> middle_visited;
 HWND configuration_window=nullptr;
 HWND settings_button=nullptr;
+HWND mode_label=nullptr;
 HWND generate_button=nullptr;
 HWND chord_editor=nullptr;
 WNDPROC chord_editor_procedure_original=nullptr;
@@ -134,6 +136,28 @@ std::unique_ptr<Gdiplus::Image> pentagon_image;
 std::string progression_config_path;
 bool configuration_interactive_resize=false;
 int configuration_tab=0;
+constexpr UINT_PTR CONFIGURATION_TRANSITION_TIMER=73;
+ULONGLONG configuration_opened=0,configuration_switched=0,wheel_started=0;
+bool configuration_closing=false,wheel_dragging=false,wheel_moved=false;
+double wheel_rotation=0,wheel_from=0,wheel_target=0,wheel_press_angle=0;
+int pending_tonic=0,pending_mode=0;
+const std::array<int,12> FIFTHS={{0,7,2,9,4,11,6,1,8,3,10,5}};
+const std::array<const char*,12> TONIC_NAMES={{"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"}};
+const std::array<const char*,7> MODE_NAMES={{"Ionian","Dorian","Phrygian","Lydian","Mixolydian","Aeolian","Locrian"}};
+HDC configuration_dc=nullptr;
+HBITMAP configuration_bitmap=nullptr;
+HGDIOBJ configuration_old_bitmap=nullptr;
+int configuration_width=0,configuration_height=0;
+bool configuration_animating=false;
+int configuration_opacity=-1;
+HDC configuration_static_dc=nullptr;
+HBITMAP configuration_static_bitmap=nullptr;
+HGDIOBJ configuration_static_old=nullptr;
+int configuration_cached_tab=-1,configuration_cached_tonic=-1,configuration_cached_mode=-1;
+std::array<double,5> configuration_cached_weights={{-1,-1,-1,-1,-1}};
+std::array<std::unique_ptr<Gdiplus::Bitmap>,36> wheel_glyphs;
+float wheel_glyph_scale=0;
+constexpr float WHEEL_X=400,WHEEL_Y=285,WHEEL_RADIUS=265,WHEEL_INNER=158,WHEEL_LABEL_RADIUS=212;
 int dragged_weight_axis=-1;
 std::string current_mode="C Ionian";
 ncnl::GeneratedProgression displayed_progression{
@@ -318,7 +342,8 @@ void stop_animation_clock() {
 void update_animation_clock() {
     bool needed=main_window && IsWindow(main_window) && !IsIconic(main_window) &&
         !interactive_resize && (playback_loop_ms>0 || !dissolving_notes.empty() ||
-        mouse_feedback.active() || configuration_mouse_feedback.active() || ncnl::preset_library_feedback().active());
+        mouse_feedback.active() || configuration_mouse_feedback.active() || ncnl::preset_library_feedback().active() ||
+        (configuration_animating && configuration_window && !IsIconic(configuration_window) && !configuration_interactive_resize));
     if (!needed) { stop_animation_clock(); return; }
     if (animation_clock || animation_period_active) { return; }
     animation_period_active=timeBeginPeriod(1)==TIMERR_NOERROR;
@@ -2714,7 +2739,92 @@ bool point_in_logical_rect(
     return point.X>=x && point.X<=x+width && point.Y>=y && point.Y<=y+height;
 }
 
-void draw_configuration_contents(HWND window,HDC dc) {
+float configuration_progress(ULONGLONG start,int duration) {
+    if (!start) { return 1; }
+    float t=std::min(1.0f,static_cast<float>(monotonic_ms()-start)/duration);
+    return t*t*(3-2*t);
+}
+void animate_configuration(HWND window) {
+    configuration_animating=true; update_animation_clock();
+    InvalidateRect(window,nullptr,FALSE);
+}
+int wheel_top_index() {
+    int index=static_cast<int>(std::round(-wheel_rotation/30));
+    return (index%12+12)%12;
+}
+void rotate_wheel_to(HWND window,int index) {
+    index=(index%12+12)%12; pending_tonic=FIFTHS[index];
+    wheel_from=wheel_rotation; wheel_target=-index*30.0;
+    wheel_target+=360*std::round((wheel_from-wheel_target)/360);
+    wheel_started=monotonic_ms(); animate_configuration(window);
+}
+void initialize_mode_wheel() {
+    auto mode=ncnl::parse_mode(current_mode); pending_tonic=mode.tonic; pending_mode=0;
+    for (int i=0;i<7;++i) { if (mode.name==MODE_NAMES[i]) { pending_mode=i; } }
+    for (int i=0;i<12;++i) { if (FIFTHS[i]==pending_tonic) { wheel_rotation=-i*30.0; } }
+    wheel_from=wheel_target=wheel_rotation; wheel_started=0; wheel_dragging=false;
+}
+std::string pending_mode_text() { return std::string(TONIC_NAMES[pending_tonic])+" "+MODE_NAMES[pending_mode]; }
+void apply_selected_mode() {
+    stop_midi_playback(); stop_key_preview();
+    current_mode=pending_mode_text();
+    SetWindowTextW(mode_label,(L"当前调式："+utf8_to_wide(current_mode)).c_str());
+    for (auto& chord:displayed_progression.chords) {
+        if (!chord.notes.empty()) { chord.emotion_score=ncnl::roll_emotion_score(current_mode,chord.notes); }
+    }
+    recalculate_progression_quality(); update_slot_ui();
+}
+double wheel_angle(const Gdiplus::PointF& p) { return std::atan2(p.Y-WHEEL_Y,p.X-WHEEL_X)*180/3.141592653589793; }
+void draw_wheel_ring(Gdiplus::Graphics& graphics,float scale_factor) {
+    if (std::abs(wheel_glyph_scale-scale_factor)>0.001f) {
+        wheel_glyph_scale=scale_factor;
+        for (int pitch=0;pitch<12;++pitch) { for (int style=0;style<3;++style) {
+            auto& glyph=wheel_glyphs[pitch*3+style];
+            glyph.reset(new Gdiplus::Bitmap(static_cast<INT>(std::ceil(80*scale_factor)),
+                static_cast<INT>(std::ceil(58*scale_factor)),PixelFormat32bppPARGB));
+            Gdiplus::Graphics cached(glyph.get()); cached.Clear(Gdiplus::Color(0,0,0,0));
+            cached.ScaleTransform(scale_factor,scale_factor);
+            draw_centered_text(cached,utf8_to_wide(TONIC_NAMES[pitch]),{0,0,80,58},style==2 ? 38 : 31,style!=0,
+                style==0 ? Gdiplus::Color(255,245,248,255) : Gdiplus::Color(255,0,0,0));
+        } }
+    }
+    auto scale=ncnl::parse_mode(pending_mode_text());
+    Gdiplus::Pen outline(Gdiplus::Color(220,143,191,209),1.5f);
+    for (int i=0;i<12;++i) {
+        int pitch=FIFTHS[i]; bool active=false;
+        for (int interval:scale.intervals) { if ((pending_tonic+interval)%12==pitch) { active=true; } }
+        float angle=static_cast<float>(-90+i*30+wheel_rotation);
+        Gdiplus::GraphicsPath sector;
+        sector.AddArc(WHEEL_X-WHEEL_RADIUS,WHEEL_Y-WHEEL_RADIUS,WHEEL_RADIUS*2,WHEEL_RADIUS*2,angle-14.3f,28.6f);
+        sector.AddArc(WHEEL_X-WHEEL_INNER,WHEEL_Y-WHEEL_INNER,WHEEL_INNER*2,WHEEL_INNER*2,angle+14.3f,-28.6f); sector.CloseFigure();
+        bool tonic=pitch==pending_tonic;
+        Gdiplus::Color fill=tonic ? Gdiplus::Color(255,96,190,158) : active
+            ? Gdiplus::Color(255,125+8*i,166+4*i,184+4*i) : Gdiplus::Color(255,43,49,65);
+        Gdiplus::SolidBrush brush(fill); graphics.FillPath(&brush,&sector);
+        if (active) { graphics.DrawPath(&outline,&sector); }
+        double rad=angle*3.141592653589793/180;
+        float x=WHEEL_X+static_cast<float>(WHEEL_LABEL_RADIUS*std::cos(rad)),y=WHEEL_Y+static_cast<float>(WHEEL_LABEL_RADIUS*std::sin(rad));
+        graphics.DrawImage(wheel_glyphs[pitch*3+(tonic ? 2 : active ? 1 : 0)].get(),Gdiplus::RectF(x-40,y-29,80,58));
+    }
+    Gdiplus::PointF triangle[3]={{390,12},{410,12},{400,30}};
+    Gdiplus::SolidBrush indicator(Gdiplus::Color(255,214,255,235)); graphics.FillPolygon(&indicator,triangle,3);
+}
+void draw_mode_wheel(Gdiplus::Graphics& graphics,bool ring=true,float scale_factor=1) {
+    if (ring) { draw_wheel_ring(graphics,scale_factor); }
+    draw_centered_text(graphics,utf8_to_wide(pending_mode_text()),{235,WHEEL_Y-30,330,60},32,true);
+    for (int mode=0;mode<7;++mode) {
+        int row=mode/4,column=mode%4;
+        Gdiplus::RectF box(62.0f+171*column+(row ? 85 : 0),565.0f+49*row,162,40);
+        Gdiplus::GraphicsPath path; add_rounded_rectangle(path,box,12);
+        Gdiplus::SolidBrush fill(mode==pending_mode ? Gdiplus::Color(255,64,137,151) : Gdiplus::Color(255,49,56,76));
+        graphics.FillPath(&fill,&path); draw_centered_text(graphics,utf8_to_wide(MODE_NAMES[mode]),box,18,mode==pending_mode);
+    }
+    Gdiplus::RectF confirm(230,670,340,40); Gdiplus::GraphicsPath path; add_rounded_rectangle(path,confirm,12);
+    Gdiplus::SolidBrush fill(Gdiplus::Color(255,62,142,117)); graphics.FillPath(&fill,&path);
+    draw_centered_text(graphics,L"确认并应用",confirm,20,true);
+}
+
+void draw_configuration_contents(HWND window,HDC dc,bool composite=true) {
     RECT client{};
     GetClientRect(window,&client);
     int width=client.right-client.left;
@@ -2765,7 +2875,7 @@ void draw_configuration_contents(HWND window,HDC dc) {
             graphics.DrawEllipse(&point_edge,point.X-8.0f,point.Y-8.0f,16.0f,16.0f);
         }
     }
-    else {
+    else if (configuration_tab==1) {
         draw_centered_text(
             graphics,L"外观与背景",Gdiplus::RectF(120.0f,110.0f,560.0f,70.0f),
             34.0f,true
@@ -2784,11 +2894,19 @@ void draw_configuration_contents(HWND window,HDC dc) {
         draw_centered_text(graphics,L"选择 PNG 背景图",button_bounds,23.0f,true);
     }
 
-    const std::array<std::wstring,2> tab_titles={{
-        L"和弦行进逻辑参数调整",L"外观设置"
+    else { draw_mode_wheel(graphics,composite,transform.scale); }
+    float reveal=composite ? configuration_progress(configuration_switched,200) : 1;
+    if (reveal<1) {
+        BYTE opacity=static_cast<BYTE>(255*(1-reveal));
+        Gdiplus::LinearGradientBrush veil(Gdiplus::Point(0,0),Gdiplus::Point(800,800),
+            Gdiplus::Color(opacity,23,29,43),Gdiplus::Color(opacity,56,44,76));
+        graphics.FillRectangle(&veil,0,0,800,714);
+    }
+    const std::array<std::wstring,3> tab_titles={{
+        L"行进逻辑参数",L"外观设置",L"调式选择"
     }};
-    for (int tab=0;tab<2;++tab) {
-        Gdiplus::RectF bounds(35.0f+370.0f*tab,724.0f,360.0f,55.0f);
+    for (int tab=0;tab<3;++tab) {
+        Gdiplus::RectF bounds(35.0f+246.0f*tab,724.0f,238.0f,55.0f);
         Gdiplus::GraphicsPath path;
         add_rounded_rectangle(path,bounds,13.0f);
         Gdiplus::SolidBrush fill(
@@ -2812,14 +2930,52 @@ void paint_configuration_window(HWND window) {
     int width=client.right-client.left;
     int height=client.bottom-client.top;
     if (width>0 && height>0) {
-        HDC buffer=CreateCompatibleDC(dc);
-        HBITMAP bitmap=CreateCompatibleBitmap(dc,width,height);
-        HGDIOBJ old_bitmap=SelectObject(buffer,bitmap);
-        draw_configuration_contents(window,buffer);
-        BitBlt(dc,0,0,width,height,buffer,0,0,SRCCOPY);
-        SelectObject(buffer,old_bitmap);
-        DeleteObject(bitmap);
-        DeleteDC(buffer);
+        if (configuration_interactive_resize && configuration_dc) {
+            StretchBlt(dc,0,0,width,height,configuration_dc,0,0,configuration_width,configuration_height,SRCCOPY);
+        } else {
+            if (!configuration_dc || configuration_width!=width || configuration_height!=height) {
+                if (configuration_static_dc) {
+                    SelectObject(configuration_static_dc,configuration_static_old); DeleteObject(configuration_static_bitmap);
+                    DeleteDC(configuration_static_dc); configuration_static_dc=nullptr;
+                }
+                if (configuration_dc) {
+                    SelectObject(configuration_dc,configuration_old_bitmap);
+                    DeleteObject(configuration_bitmap); DeleteDC(configuration_dc);
+                }
+                configuration_dc=CreateCompatibleDC(dc); configuration_bitmap=CreateCompatibleBitmap(dc,width,height);
+                configuration_old_bitmap=SelectObject(configuration_dc,configuration_bitmap);
+                configuration_width=width; configuration_height=height;
+            }
+            if (!configuration_static_dc) {
+                configuration_static_dc=CreateCompatibleDC(dc);
+                configuration_static_bitmap=CreateCompatibleBitmap(dc,width,height);
+                configuration_static_old=SelectObject(configuration_static_dc,configuration_static_bitmap);
+                configuration_cached_tab=-1;
+            }
+            const auto& weights=ncnl::progression_weights().values;
+            if (configuration_cached_tab!=configuration_tab || configuration_cached_tonic!=pending_tonic ||
+                configuration_cached_mode!=pending_mode || configuration_cached_weights!=weights) {
+                draw_configuration_contents(window,configuration_static_dc,false);
+                configuration_cached_tab=configuration_tab; configuration_cached_tonic=pending_tonic;
+                configuration_cached_mode=pending_mode; configuration_cached_weights=weights;
+            }
+            BitBlt(configuration_dc,0,0,width,height,configuration_static_dc,0,0,SRCCOPY);
+            {
+                Gdiplus::Graphics graphics(configuration_dc); auto transform=configuration_transform(window);
+                graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBilinear);
+                graphics.TranslateTransform(transform.offset_x,transform.offset_y); graphics.ScaleTransform(transform.scale,transform.scale);
+                if (configuration_tab==2) { draw_wheel_ring(graphics,transform.scale); }
+                float reveal=configuration_progress(configuration_switched,200);
+                if (reveal<1) {
+                    BYTE alpha=static_cast<BYTE>(255*(1-reveal));
+                    Gdiplus::LinearGradientBrush veil(Gdiplus::Point(0,0),Gdiplus::Point(800,800),
+                        Gdiplus::Color(alpha,23,29,43),Gdiplus::Color(alpha,56,44,76));
+                    graphics.FillRectangle(&veil,0,0,800,714);
+                }
+            }
+            BitBlt(dc,0,0,width,height,configuration_dc,0,0,SRCCOPY);
+        }
     }
     EndPaint(window,&paint);
 }
@@ -2891,8 +3047,31 @@ LRESULT CALLBACK configuration_window_procedure(
     HWND window,UINT message,WPARAM w_param,LPARAM l_param
 ) {
     switch (message) {
+    case WM_TIMER:
+        if (w_param==CONFIGURATION_TRANSITION_TIMER) {
+            float opening=configuration_progress(configuration_opened,configuration_closing ? 140 : 200);
+            int alpha=static_cast<int>(255*(configuration_closing ? 1-opening : opening));
+            if (alpha!=configuration_opacity) {
+                SetLayeredWindowAttributes(window,0,static_cast<BYTE>(alpha),LWA_ALPHA); configuration_opacity=alpha;
+            }
+            if (configuration_closing && opening>=1) { DestroyWindow(window); return 0; }
+            float rotation=configuration_progress(wheel_started,190);
+            double previous_rotation=wheel_rotation;
+            if (wheel_started && !wheel_dragging) { wheel_rotation=wheel_from+(wheel_target-wheel_from)*rotation; }
+            if (!configuration_interactive_resize && !IsIconic(window) &&
+                (!configuration_static_dc || configuration_progress(configuration_switched,200)<1 ||
+                 wheel_dragging || previous_rotation!=wheel_rotation)) {
+                InvalidateRect(window,nullptr,FALSE);
+            }
+            if (opening>=1 && configuration_progress(configuration_switched,200)>=1 && rotation>=1 && !wheel_dragging) {
+                configuration_animating=false; update_animation_clock();
+            }
+            return 0;
+        }
+        break;
     case WM_SIZE:
         if (w_param==SIZE_MINIMIZED) { configuration_mouse_feedback.clear(); update_animation_clock(); }
+        else { update_animation_clock(); }
         break;
     case WM_SIZING:
         enforce_square_resize(window,w_param,reinterpret_cast<RECT*>(l_param));
@@ -2904,11 +3083,12 @@ LRESULT CALLBACK configuration_window_procedure(
         }
         break;
     case WM_ENTERSIZEMOVE:
-        configuration_mouse_feedback.clear(); update_animation_clock();
         configuration_interactive_resize=true;
+        configuration_mouse_feedback.clear(); update_animation_clock();
         return 0;
     case WM_EXITSIZEMOVE:
         configuration_interactive_resize=false;
+        update_animation_clock();
         InvalidateRect(window,nullptr,FALSE);
         return 0;
     case WM_GETMINMAXINFO: {
@@ -2926,17 +3106,34 @@ LRESULT CALLBACK configuration_window_procedure(
     case WM_PAINT:
         paint_configuration_window(window);
         return 0;
+    case WM_KEYDOWN:
+        if (w_param==VK_RETURN && !configuration_closing && (l_param&(1LL<<30))==0) {
+            apply_selected_mode(); SendMessageW(window,WM_CLOSE,0,0); return 0;
+        }
+        break;
     case WM_LBUTTONDOWN: {
         Gdiplus::PointF point=configuration_logical_point(window,l_param);
-        if (point_in_logical_rect(point,35.0f,724.0f,360.0f,55.0f)) {
-            configuration_tab=0;
-            InvalidateRect(window,nullptr,FALSE);
-            return 0;
+        for (int tab=0;tab<3;++tab) {
+            if (point_in_logical_rect(point,35.0f+246*tab,724,238,55)) {
+                configuration_tab=tab; configuration_switched=monotonic_ms();
+                animate_configuration(window); return 0;
+            }
         }
-        if (point_in_logical_rect(point,405.0f,724.0f,360.0f,55.0f)) {
-            configuration_tab=1;
-            InvalidateRect(window,nullptr,FALSE);
-            return 0;
+        if (configuration_tab==2) {
+            if (point_in_logical_rect(point,230,670,340,40)) {
+                apply_selected_mode(); SendMessageW(window,WM_CLOSE,0,0); return 0;
+            }
+            for (int mode=0;mode<7;++mode) {
+                int row=mode/4,column=mode%4;
+                if (point_in_logical_rect(point,62.0f+171*column+(row ? 85 : 0),565.0f+49*row,162,40)) {
+                    pending_mode=mode; configuration_switched=0; InvalidateRect(window,nullptr,FALSE); return 0;
+                }
+            }
+            float dx=point.X-WHEEL_X,dy=point.Y-WHEEL_Y; float radius=std::sqrt(dx*dx+dy*dy);
+            if (radius>=WHEEL_INNER && radius<=WHEEL_RADIUS+5) {
+                wheel_dragging=true; wheel_moved=false; wheel_started=0;
+                wheel_press_angle=wheel_angle(point); SetCapture(window); animate_configuration(window); return 0;
+            }
         }
         if (configuration_tab==1 &&
             point_in_logical_rect(point,230.0f,310.0f,340.0f,78.0f)) {
@@ -2954,12 +3151,29 @@ LRESULT CALLBACK configuration_window_procedure(
         break;
     }
     case WM_MOUSEMOVE:
+        if (wheel_dragging && GetCapture()==window) {
+            auto point=configuration_logical_point(window,l_param);
+            double angle=wheel_angle(point),delta=angle-wheel_press_angle;
+            if (delta>180) { delta-=360; } if (delta<-180) { delta+=360; }
+            if (std::abs(delta)>0.2) { wheel_moved=true; }
+            wheel_rotation+=delta; wheel_press_angle=angle; pending_tonic=FIFTHS[wheel_top_index()];
+            return 0; // Coalesced high-precision frame clock paints the latest pointer state.
+        }
         if (dragged_weight_axis>=0 && GetCapture()==window) {
             update_dragged_weight(window,configuration_logical_point(window,l_param));
             return 0;
         }
         break;
     case WM_LBUTTONUP:
+        if (wheel_dragging) {
+            int index=wheel_top_index();
+            if (!wheel_moved) {
+                auto point=configuration_logical_point(window,l_param);
+                index=static_cast<int>(std::round((wheel_angle(point)+90-wheel_rotation)/30));
+            }
+            wheel_dragging=false; if (GetCapture()==window) { ReleaseCapture(); }
+            rotate_wheel_to(window,index); return 0;
+        }
         if (dragged_weight_axis>=0) {
             update_dragged_weight(window,configuration_logical_point(window,l_param));
             dragged_weight_axis=-1;
@@ -2971,15 +3185,35 @@ LRESULT CALLBACK configuration_window_procedure(
         }
         break;
     case WM_CAPTURECHANGED:
+        if (wheel_dragging) { wheel_dragging=false; rotate_wheel_to(window,wheel_top_index()); }
         if (dragged_weight_axis>=0) {
             dragged_weight_axis=-1;
             ncnl::save_progression_config(progression_config_path);
         }
         return 0;
+    case WM_MOUSEWHEEL:
+        if (configuration_tab==2) {
+            int index=wheel_started && !wheel_dragging ? static_cast<int>(std::round(-wheel_target/30)) : wheel_top_index();
+            rotate_wheel_to(window,index+GET_WHEEL_DELTA_WPARAM(w_param)/WHEEL_DELTA);
+            return 0;
+        }
+        break;
     case WM_CLOSE:
-        DestroyWindow(window);
+        configuration_closing=true; configuration_opened=monotonic_ms();
+        configuration_mouse_feedback.clear(); EnableWindow(window,FALSE); animate_configuration(window);
         return 0;
     case WM_DESTROY:
+        KillTimer(window,CONFIGURATION_TRANSITION_TIMER); wheel_dragging=false; dragged_weight_axis=-1;
+        configuration_animating=false;
+        if (configuration_dc) {
+            SelectObject(configuration_dc,configuration_old_bitmap); DeleteObject(configuration_bitmap); DeleteDC(configuration_dc);
+            configuration_dc=nullptr; configuration_bitmap=nullptr;
+        }
+        if (configuration_static_dc) {
+            SelectObject(configuration_static_dc,configuration_static_old); DeleteObject(configuration_static_bitmap);
+            DeleteDC(configuration_static_dc); configuration_static_dc=nullptr;
+        }
+        for (auto& glyph:wheel_glyphs) { glyph.reset(); } wheel_glyph_scale=0;
         ncnl::save_progression_config(progression_config_path);
         configuration_mouse_feedback.shutdown(); update_animation_clock();
         configuration_window=nullptr;
@@ -2995,11 +3229,15 @@ void open_configuration_window(HWND owner) {
         return;
     }
     DWORD style=WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX;
+    initialize_mode_wheel(); configuration_closing=false;
+    configuration_opened=monotonic_ms(); configuration_switched=configuration_opened;
+    configuration_opacity=0;
     RECT size={0,0,SETTINGS_DESIGN_SIZE,SETTINGS_DESIGN_SIZE};
     AdjustWindowRectEx(&size,style,FALSE,0);
+    POINT position=ncnl::centered_window_position(owner,size.right-size.left,size.bottom-size.top);
     configuration_window=CreateWindowExW(
-        0,L"NoChordNoLifeConfigurationWindow",L"NoChordNoLife 配置",
-        style,CW_USEDEFAULT,CW_USEDEFAULT,size.right-size.left,size.bottom-size.top,
+        WS_EX_LAYERED,L"NoChordNoLifeConfigurationWindow",L"NoChordNoLife 配置",
+        style,position.x,position.y,size.right-size.left,size.bottom-size.top,
         owner,nullptr,GetModuleHandleW(nullptr),nullptr
     );
     if (!configuration_window) {
@@ -3007,6 +3245,8 @@ void open_configuration_window(HWND owner) {
         return;
     }
     configuration_mouse_feedback.initialize(configuration_window,executable_directory()+L"\\assets\\cursor");
+    SetLayeredWindowAttributes(configuration_window,0,0,LWA_ALPHA);
+    animate_configuration(configuration_window);
     ShowWindow(configuration_window,SW_SHOW);
     UpdateWindow(configuration_window);
 }
@@ -3042,7 +3282,7 @@ LRESULT CALLBACK window_procedure(
                 reinterpret_cast<LONG_PTR>(chord_editor_procedure)
             )
         );
-        create_control(
+        mode_label=create_control(
             L"STATIC",L"当前调式：C Ionian",
             WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
             45,30,420,55,window,0,FontKind::title
@@ -3264,6 +3504,10 @@ LRESULT CALLBACK window_procedure(
         ncnl::preset_library_feedback().expire(now);
         if (w_param==DISSOLVE_TIMER || w_param==PLAYBACK_TIMER) { expire_dissolving_notes(now); }
         if ((w_param==PLAYBACK_TIMER || w_param==DISSOLVE_TIMER) && !IsIconic(window)) {
+            if (configuration_animating && configuration_window) {
+                SendMessageW(configuration_window,WM_TIMER,CONFIGURATION_TRANSITION_TIMER,0);
+                UpdateWindow(configuration_window);
+            }
             if (redraw_roll) { InvalidateRect(window,&area,FALSE); }
             mouse_feedback.render(now);
             configuration_mouse_feedback.render(now);
@@ -3274,6 +3518,10 @@ LRESULT CALLBACK window_procedure(
 
     case WM_ANIMATION_FRAME: {
         InterlockedExchange(&animation_frame_pending,0);
+        if (configuration_animating && configuration_window && !IsIconic(configuration_window) && !configuration_interactive_resize) {
+            SendMessageW(configuration_window,WM_TIMER,CONFIGURATION_TRANSITION_TIMER,0);
+            if (configuration_window) { UpdateWindow(configuration_window); }
+        }
         bool redraw_roll=playback_loop_ms>0 || !dissolving_notes.empty();
         RECT area=animation_effect_bounds();
         ULONGLONG now=monotonic_ms();
@@ -3421,6 +3669,7 @@ LRESULT CALLBACK window_procedure(
 
     case WM_DESTROY:
         stop_animation_clock();
+        if (configuration_window) { DestroyWindow(configuration_window); }
         ncnl::close_preset_library();
         mouse_feedback.shutdown();
         configuration_mouse_feedback.shutdown();

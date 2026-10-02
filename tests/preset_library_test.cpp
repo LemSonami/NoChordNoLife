@@ -45,7 +45,7 @@ int main() {
         SendMessageW(window,WM_LBUTTONUP,0,MAKELPARAM(x,y));
     };
     RECT client{}; GetClientRect(window,&client); assert(client.right==1000 && client.bottom==1000);
-    SetWindowTextW(ncnl::library->editor,L"界面保存"); click(800,770);
+    SetWindowTextW(ncnl::library->editor,L"界面保存"); click(800,ncnl::SAVE_Y+25);
     assert(ncnl::library->store->files().size()==5);
     assert(ncnl::library->status==L"已保存为 MIDI 预设");
     click(70,180); SendMessageW(window,WM_LBUTTONDBLCLK,MK_LBUTTON,MAKELPARAM(70,180));
@@ -117,8 +117,8 @@ int main() {
     {
         Gdiplus::Bitmap preview(1000,1000,PixelFormat32bppARGB); Gdiplus::Graphics graphics(&preview);
         ncnl::draw(graphics);
-        ncnl::rounded(graphics,{50,746,598,50},12,Gdiplus::Color(255,31,43,61));
-        ncnl::text(graphics,ncnl::editor_text(),{64,746,570,50},22);
+        ncnl::rounded(graphics,{50,ncnl::SAVE_Y,598,50},12,Gdiplus::Color(255,31,43,61));
+        ncnl::text(graphics,ncnl::editor_text(),{64,ncnl::SAVE_Y,570,50},22);
         UINT count=0,size=0; Gdiplus::GetImageEncodersSize(&count,&size);
         std::vector<unsigned char> storage(size);
         auto codecs=reinterpret_cast<Gdiplus::ImageCodecInfo*>(storage.data()); Gdiplus::GetImageEncoders(count,size,codecs);
