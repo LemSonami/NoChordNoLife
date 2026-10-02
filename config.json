@@ -1,9 +1,9 @@
 {
   "chord_progression_weights": {
-    "voice_leading_efficiency": 0.023224,
+    "voice_leading_efficiency": 0.394723,
     "common_tone_retention": 0.000000,
-    "modal_consistency": 0.488388,
-    "root_motion": 0.488388,
-    "tonal_attraction": 0.000000
+    "modal_consistency": 0.049870,
+    "root_motion": 0.490878,
+    "tonal_attraction": 0.064530
   }
 }

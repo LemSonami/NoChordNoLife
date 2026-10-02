@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <iomanip>
 #include <map>
 #include <random>
@@ -40,11 +41,13 @@ struct Candidate {
     std::string notes;
     double emotion_score;
     unsigned int pitch_mask;
+    double preference;
 };
 
 struct Trial {
     std::vector<std::size_t> choices;
     double quality;
+    double preference;
 };
 
 std::string chord_to_string(const Chord& chord) {
@@ -82,6 +85,9 @@ unsigned int chord_mask(const Chord& chord) {
 }
 
 std::vector<Candidate> build_candidates(const std::string& mode_string) {
+    auto mode=parse_mode(mode_string);
+    unsigned scale_mask=0;
+    for (int interval:mode.intervals) { scale_mask|=1u<<((mode.tonic+interval)%12); }
     std::vector<std::pair<std::string,unsigned int>> chord_texts;
     std::set<unsigned int> seen;
 
@@ -111,10 +117,16 @@ std::vector<Candidate> build_candidates(const std::string& mode_string) {
 
     std::vector<Candidate> candidates;
     for (const auto& item:chord_texts) {
+        Chord parsed=parse_chord(item.first);
+        int outside=0;
+        for (int pc:parsed) { outside+=(scale_mask&(1u<<pc))==0; }
+        // Soft preferences: each borrowed tone lowers odds; dyads remain a fallback.
+        double preference=std::pow(0.15,outside)*(parsed.size()==2 ? 0.18 : 1.0);
         candidates.push_back({
             item.first,
             chord_emotion_score(mode_string,item.first),
             item.second,
+            preference,
         });
     }
     return candidates;
@@ -127,7 +139,7 @@ Candidate fixed_candidate(
     std::string notes=normalize_chord_text(constraint.fixed_notes);
     Chord parsed=parse_roll_notes(notes);
     double score=roll_emotion_score(mode_string,notes);
-    return {notes,score,chord_mask(parsed)};
+    return {notes,score,chord_mask(parsed),1.0}; // Explicit user notes are never penalized or replaced.
 }
 
 }  // namespace
@@ -149,10 +161,10 @@ bool score_matches_preset(double score,int preset) {
 
 const char* emotion_preset_label(int preset) {
     static const std::array<const char*,5> labels={{
-        "0-20","21-40","41-60","61-80","81-100"
+        "I 黯然","II 伤心","III 暧昧","IV 希望","V 光明"
     }};
     if (preset==-1) {
-        return "未设置";
+        return "ᗜ𖥦ᗜ";
     }
     if (preset<0 || preset>=static_cast<int>(labels.size())) {
         return "未知";
@@ -212,15 +224,20 @@ GeneratedProgression generate_progression(
     trials.reserve(SAMPLE_COUNT);
     // 各分块复用同一衔接缓存，分块数量增加时仍避免重复计算。
     std::map<std::pair<unsigned int,unsigned int>,double> transition_cache;
+    std::vector<std::discrete_distribution<std::size_t>> choices;
+    for (const auto& pool:pools) {
+        std::vector<double> weights;
+        for (const auto& candidate:pool) { weights.push_back(candidate.preference); }
+        choices.emplace_back(weights.begin(),weights.end());
+    }
 
     for (int sample=0;sample<SAMPLE_COUNT;++sample) {
         Trial trial{};
+        trial.preference=0.0; // Log-space keeps long progressions numerically stable.
         trial.choices.resize(count);
         for (std::size_t position=0;position<count;++position) {
-            std::uniform_int_distribution<std::size_t> choose(
-                0,pools[position].size()-1
-            );
-            trial.choices[position]=choose(random_engine);
+            trial.choices[position]=choices[position](random_engine);
+            trial.preference+=std::log(pools[position][trial.choices[position]].preference);
         }
 
         double transition_total=0.0;
@@ -257,7 +274,12 @@ GeneratedProgression generate_progression(
     if (eligible_unique.empty()) {
         throw std::runtime_error("此次采样未找到进行质量大于 65 且小于 90 的结果。请调整分块、情感预设或行进权重后重试。");
     }
-    std::uniform_int_distribution<std::size_t> choose_result(0,eligible_unique.size()-1);
+    // Prefer modal, fuller voicings over a slightly higher progression score.
+    std::vector<double> result_weights;
+    double best_preference=eligible_unique.front()->preference;
+    for (auto trial:eligible_unique) { best_preference=std::max(best_preference,trial->preference); }
+    for (auto trial:eligible_unique) { result_weights.push_back(std::exp(trial->preference-best_preference)); }
+    std::discrete_distribution<std::size_t> choose_result(result_weights.begin(),result_weights.end());
     const Trial& selected=*eligible_unique[choose_result(random_engine)];
 
     GeneratedProgression result{};
@@ -270,4 +292,4 @@ GeneratedProgression generate_progression(
     return result;
 }
 
-}  // namespace ncnl
+}
