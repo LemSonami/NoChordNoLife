@@ -8,8 +8,8 @@
 
 namespace ncnl {
 
-// Decode once, release the source file, and cache the cropped/scaled pixel layer.
-// Draws during animation only composite this cache; they never reopen a PNG.
+
+
 class PixelSkin {
     friend struct PixelSkinTestAccess;
     std::unique_ptr<Gdiplus::Bitmap> pixels,scaled;

@@ -7,7 +7,7 @@
 namespace ncnl {
 enum class AppCursor { link,vertical,unavailable,text };
 
-// Independent, input-transparent layer: effects also appear over native buttons.
+
 class MouseFeedback {
 public:
     void initialize(HWND owner,const std::wstring& asset_directory);

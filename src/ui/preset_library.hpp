@@ -17,7 +17,7 @@ public:
     void rename(std::size_t index,const std::wstring& name);
     void reorder(std::size_t from,std::size_t to);
     void recycle(std::size_t index,HWND owner);
-    int undo_recycle(); // Restore the most recent deletion; -1 when history is empty.
+    int undo_recycle();
     static std::wstring display_name(const std::wstring& file);
 private:
     void persist_order();

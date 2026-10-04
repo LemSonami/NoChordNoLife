@@ -1,6 +1,5 @@
 #include "chord_algorithms.hpp"
 #include "../config/progression_config.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <functional>

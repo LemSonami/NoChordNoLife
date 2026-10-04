@@ -1,7 +1,3 @@
-// Deterministic geometry correction of authored button PNGs.
-// Extend background seams and rebuild the native-palette face/rounded rim;
-// protected lettering and foliage/petal pixels are translated, NEVER stretched.
-// User explicitly authorized programmatic image correction.
 #define UNICODE
 #define _UNICODE
 #include "../ui/button_artwork.hpp"
@@ -19,7 +15,7 @@ struct Raster {
     std::vector<int> origins;
     std::uint32_t at(int x,int y) const { return pixels[y*w+x]; }
 };
-struct Protected { Box box; int kind; }; // 0 lettering, 1 left decoration, 2 right decoration.
+struct Protected { Box box; int kind; };
 int channel(std::uint32_t p,int shift) { return (p>>shift)&255; }
 int difference(std::uint32_t a,std::uint32_t b) {
     return std::abs(channel(a,16)-channel(b,16))+std::abs(channel(a,8)-channel(b,8))+
@@ -29,26 +25,25 @@ int gcd(int a,int b) { while (b) { int r=a%b; a=b; b=r; } return a; }
 Raster read(const std::wstring& path) {
     Gdiplus::Bitmap image(path.c_str());
     if (image.GetLastStatus()!=Gdiplus::Ok || image.GetWidth()>8192 || image.GetHeight()>8192) {
-        throw std::runtime_error("Cannot decode source PNG");
+        throw std::runtime_error("无法解码源PNG…");
     }
     Raster full{static_cast<int>(image.GetWidth()),static_cast<int>(image.GetHeight()),{}, {}};
     full.pixels.resize(full.w*full.h);
     Gdiplus::Rect rectangle(0,0,full.w,full.h); Gdiplus::BitmapData data={};
     if (image.LockBits(&rectangle,Gdiplus::ImageLockModeRead,PixelFormat32bppARGB,&data)!=Gdiplus::Ok) {
-        throw std::runtime_error("Cannot read source pixels");
+        throw std::runtime_error("无法读取源像素…");
     }
     int x0=full.w,y0=full.h,x1=-1,y1=-1;
     for (int y=0;y<full.h;++y) {
         auto row=reinterpret_cast<const std::uint32_t*>(static_cast<const BYTE*>(data.Scan0)+y*data.Stride);
         for (int x=0;x<full.w;++x) {
-            // Remove nearly transparent export noise before defining geometry.
             auto pixel=channel(row[x],24)>8 ? row[x] : 0;
             full.pixels[y*full.w+x]=pixel;
             if (pixel) { x0=std::min(x0,x); y0=std::min(y0,y); x1=std::max(x1,x); y1=std::max(y1,y); }
         }
     }
     image.UnlockBits(&data);
-    if (x1<x0) { throw std::runtime_error("Empty source artwork"); }
+    if (x1<x0) { throw std::runtime_error("？！空空！？"); }
     Raster crop{x1-x0+1,y1-y0+1,{}, {}}; crop.pixels.resize(crop.w*crop.h);
     for (int y=0;y<crop.h;++y) { for (int x=0;x<crop.w;++x) { crop.pixels[y*crop.w+x]=full.at(x+x0,y+y0); } }
     crop.origins.resize(crop.pixels.size());
@@ -76,8 +71,6 @@ std::vector<BYTE> foreground_mask(const Raster& r) {
                 if (mask[neighbor]==1) { mask[neighbor]=2; component.push_back(neighbor); }
             } }
         }
-        // The continuous outer/inner rim may have the same dark ink colour as
-        // the lettering. Its large connected component must not be protected.
         bool frame=x1-x0>r.w*0.85 || y1-y0>r.h*0.93;
         for (int index:component) { mask[index]=frame ? 2 : 3; }
     }
@@ -93,9 +86,6 @@ Box ink_bounds(const Raster& r,const std::vector<BYTE>& mask,float left,float ri
     int rim=static_cast<int>(r.h*0.06f);
     for (int y=static_cast<int>(r.h*0.13f);y<static_cast<int>(r.h*0.90f);++y) {
         for (int x=static_cast<int>(r.w*left);x<static_cast<int>(r.w*right);++x) {
-            // A rounded frame at the sides is not part of the foliage. Detect
-            // interior ink only, or the protected box would include a corner
-            // and force a seam through the frame's rounded silhouette.
             if (x<=row_left[y]+rim || x>=row_right[y]-rim ||
                 y<=column_top[x]+rim || y>=column_bottom[x]-rim) { continue; }
             if (mask[y*r.w+x]==3) {
@@ -104,7 +94,7 @@ Box ink_bounds(const Raster& r,const std::vector<BYTE>& mask,float left,float ri
             }
         }
     }
-    if (box.x1<box.x0) { throw std::runtime_error("No protected foreground found"); }
+    if (box.x1<box.x0) { throw std::runtime_error("？！空空！？"); }
     box.x0=std::max(1,box.x0-margin); box.y0=std::max(1,box.y0-margin);
     box.x1=std::min(r.w-2,box.x1+margin); box.y1=std::min(r.h-2,box.y1+margin);
     return box;
@@ -135,8 +125,6 @@ void transpose(Raster& r,std::vector<Protected>& boxes) {
 void insert(Raster& r,std::vector<Protected>& boxes,int count,bool before,bool horizontal) {
     if (!count) { return; }
     const double infinity=1e30;
-    // Before/after every protected rectangle is fixed for all of its scanlines,
-    // so each complete word/decoration is rigidly translated, never warped.
     std::vector<bool> preceding;
     const auto word=boxes[0].box;
     for (const auto& p:boxes) {
@@ -152,7 +140,6 @@ void insert(Raster& r,std::vector<Protected>& boxes,int count,bool before,bool h
         int low=1,high=r.w-2;
         if (before) { high=std::min(high,r.w/2); } else { low=std::max(low,r.w/2); }
         if (!horizontal && (y==0 || y==r.h-1)) {
-            // Extend the straight side, NEVER duplicate a rounded corner.
             low=std::max(low,r.w/3); high=std::min(high,r.w*2/3);
         }
         for (std::size_t i=0;i<boxes.size();++i) {
@@ -167,7 +154,6 @@ void insert(Raster& r,std::vector<Protected>& boxes,int count,bool before,bool h
             double energy=difference(p,q)*3+difference(p,face)*0.15;
             if (y>0) { energy+=difference(p,r.at(x,y-1)); }
             if (y+1<r.h) { energy+=difference(p,r.at(x,y+1)); }
-            // Stay in the face rather than thickening an inner highlight/rim.
             if (channel(p,24)<240 || channel(q,24)<240) { energy+=10000; }
             double best=y ? previous[x] : 0; int offset=0;
             for (int step=-4;y && step<=4;++step) {
@@ -180,7 +166,7 @@ void insert(Raster& r,std::vector<Protected>& boxes,int count,bool before,bool h
         previous.swap(current);
     }
     auto best=std::min_element(previous.begin(),previous.end());
-    if (*best>=infinity/2) { throw std::runtime_error("No background-only seam; protected regions overlap"); }
+    if (*best>=infinity/2) { throw std::runtime_error("？！无背景缝隙！？"); }
     std::vector<int> seam(r.h); int x=static_cast<int>(best-previous.begin());
     for (int y=r.h-1;y>=0;--y) { seam[y]=x; x+=directions[y*r.w+x]; }
     Raster next{r.w+count,r.h,{}, {}}; next.pixels.resize(next.w*next.h);
@@ -235,8 +221,6 @@ std::vector<BYTE> preserved_pixels(const Raster& source,const std::vector<Protec
         if (!contains(boxes[1].box,x,y) && !contains(boxes[2].box,x,y)) { continue; }
         if (mask[index]==3 || coloured[index]) { keep[index]=1; }
     } }
-    // Keep light interiors enclosed by leaf outlines / petals as original pixels,
-    // rather than accidentally treating a pale leaf or flower centre as backdrop.
     for (int region=1;region<=2;++region) {
         Box b=boxes[region].box; std::vector<BYTE> visited(source.pixels.size(),0);
         for (int y=b.y0;y<=b.y1;++y) { for (int x=b.x0;x<=b.x1;++x) {
@@ -257,7 +241,6 @@ std::vector<BYTE> preserved_pixels(const Raster& source,const std::vector<Protec
             if (!exterior) { for (int index:component) { keep[index]=1; } }
         } }
     }
-    // Retain antialiased edges, not just solid ink/flower pixels.
     auto expanded=keep;
     for (int y=1;y<source.h-1;++y) { for (int x=1;x<source.w-1;++x) { if (keep[y*source.w+x]) {
         for (int dy=-1;dy<=1;++dy) { for (int dx=-1;dx<=1;++dx) { expanded[(y+dy)*source.w+x+dx]=1; } }
@@ -283,10 +266,7 @@ void repair_frame(Raster& r,const Raster& source,const std::vector<BYTE>& keep) 
     } }
     int dominant=static_cast<int>(std::max_element(histogram.begin(),histogram.end())-histogram.begin());
     std::uint32_t face=0xff000000 | ((dominant/256*16+8)<<16) | (((dominant/16)%16*16+8)<<8) | (dominant%16*16+8);
-    if (!histogram[dominant]) { throw std::runtime_error("No clear face background for frame repair"); }
-    // Reconstruct just the frame using its original top/bottom colour profiles.
-    // Rounded geometry is regular. Rebuild the face in its dominant original
-    // palette instead of duplicating an old inner border or stretching texture.
+    if (!histogram[dominant]) { throw std::runtime_error("？！无清晰背景！？"); }
     float radius=source.h*0.20f;
     int grid=std::max(1,source.h/50);
     for (int y=0;y<r.h;++y) { for (int x=0;x<r.w;++x) {
@@ -313,13 +293,13 @@ void save(const Raster& r,const std::wstring& file) {
     Gdiplus::Bitmap bitmap(r.w,r.h,r.w*4,PixelFormat32bppARGB,
         reinterpret_cast<BYTE*>(const_cast<std::uint32_t*>(r.pixels.data())));
     const CLSID png={0x557cf406,0x1a04,0x11d3,{0x9a,0x73,0,0,0xf8,0x1e,0xf3,0x2e}};
-    if (bitmap.Save(file.c_str(),&png,nullptr)!=Gdiplus::Ok) { throw std::runtime_error("Cannot save corrected PNG"); }
+    if (bitmap.Save(file.c_str(),&png,nullptr)!=Gdiplus::Ok) { throw std::runtime_error("？！保存失败！？"); }
 }
 void fit(const std::wstring& input,const std::wstring& output,ncnl::ButtonArt id) {
     Raster source=read(input),r=source;
     auto design=ncnl::button_art_design_size(id);
     if (static_cast<long long>(source.w)*design.Height==static_cast<long long>(source.h)*design.Width) {
-        save(source,output); std::wcout<<L"PASS "<<ncnl::button_art_filename(id)<<L": already exact; no image changes\n"; return;
+        save(source,output); std::wcout<<L"PASS "<<ncnl::button_art_filename(id)<<L": 已经导出了，没有图像更改\n"; return;
     }
     auto regions=foreground(r,id),original_regions=regions; int divisor=gcd(design.Width,design.Height);
     int a=design.Width/divisor,b=design.Height/divisor;
@@ -332,15 +312,13 @@ void fit(const std::wstring& input,const std::wstring& output,ncnl::ButtonArt id
     transpose(r,regions);
     repair_frame(r,source,keep);
     if (r.w!=width || r.h!=height || static_cast<long long>(r.w)*design.Height!=static_cast<long long>(r.h)*design.Width) {
-        throw std::runtime_error("Invalid final geometry");
+        throw std::runtime_error("？！无效几何！？");
     }
-    // Stronger than a visual claim: protected ink/foliage/petal pixels are
-    // unchanged, including their antialiased edges. Background can be rebuilt.
     for (std::size_t i=0;i<regions.size();++i) {
         auto old=original_regions[i].box,now=regions[i].box;
         for (int y=0;y<=old.y1-old.y0;++y) { for (int x=0;x<=old.x1-old.x0;++x) {
             if (keep[(old.y0+y)*source.w+old.x0+x] && source.at(old.x0+x,old.y0+y)!=r.at(now.x0+x,now.y0+y)) {
-                throw std::runtime_error("Protected lettering/decoration pixels changed");
+                throw std::runtime_error("？！有东西被改掉了！？");
             }
         } }
     }
@@ -348,20 +326,20 @@ void fit(const std::wstring& input,const std::wstring& output,ncnl::ButtonArt id
     for (int y=0;y<r.h;++y) { for (int x=0;x<r.w;++x) { if (channel(r.at(x,y),24)!=0) {
         x0=std::min(x0,x); x1=std::max(x1,x); y0=std::min(y0,y); y1=std::max(y1,y);
     } } }
-    if (x0!=0 || y0!=0 || x1!=r.w-1 || y1!=r.h-1) { throw std::runtime_error("Actual nontransparent bounds do not match target"); }
+    if (x0!=0 || y0!=0 || x1!=r.w-1 || y1!=r.h-1) { throw std::runtime_error("？！实际不透明边界与目标不匹配！？"); }
     save(r,output);
     std::wcout<<L"PASS "<<ncnl::button_art_filename(id)<<L": "<<source.w<<L"x"<<source.h<<L" -> "
-        <<r.w<<L"x"<<r.h<<L", exact aspect; lettering and both decorations pixel-identical\n";
+        <<r.w<<L"x"<<r.h<<L", 字母和两种装饰像素一模一样\n";
 }
 }
 int main(int argc,char* argv[]) {
-    if (argc!=3) { std::cerr<<"Usage: button_asset_fit SOURCE_DIRECTORY OUTPUT_DIRECTORY\n"; return 1; }
+    if (argc!=3) { std::cerr<<"用法：button_asset_fit 源目录 输出目录\n"; return 1; }
     std::string from=argv[1],to=argv[2]; std::wstring input(from.begin(),from.end()),output(to.begin(),to.end());
     ULONG_PTR token=0; Gdiplus::GdiplusStartupInput startup;
     if (Gdiplus::GdiplusStartup(&token,&startup,nullptr)!=Gdiplus::Ok) { return 1; }
     int result=0;
     try {
-        if (input==output) { throw std::runtime_error("Use a separate output directory; preserve source artwork"); }
+        if (input==output) { throw std::runtime_error("使用单独的输出目录；保留源艺术作品"); }
         for (int i=0;i<static_cast<int>(ncnl::ButtonArt::Count);++i) {
             auto id=static_cast<ncnl::ButtonArt>(i); auto filename=std::wstring(ncnl::button_art_filename(id))+L".png";
             fit(input+L"/"+filename,output+L"/"+filename,id);

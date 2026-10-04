@@ -1,5 +1,4 @@
 #include "progression_config.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <fstream>

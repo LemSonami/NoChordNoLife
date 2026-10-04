@@ -167,7 +167,7 @@ HRESULT drag_midi_file(const std::vector<unsigned char>& bytes,const std::wstrin
     for (auto& character:safe) {
         if (character<32 || std::wcschr(L"<>:\"/\\|?*",character)) { character=L'_'; }
     }
-    file.path=file.directory+L"\\NCNL_"+(safe.empty() ? L"Chord" : safe)+L".mid";
+    file.path=file.directory+L"\\NCNL_"+(safe.empty() ? L"和弦" : safe)+L".mid";
     HANDLE handle=CreateFileW(file.path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
     if (handle==INVALID_HANDLE_VALUE) { return HRESULT_FROM_WIN32(GetLastError()); }
     DWORD written=0;

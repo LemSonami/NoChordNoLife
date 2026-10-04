@@ -3,7 +3,7 @@
 #include <algorithm>
 
 namespace ncnl {
-// Center owned popups on the application, keeping them on the owner's monitor.
+
 inline POINT centered_window_position(HWND owner,int width,int height) {
     MONITORINFO monitor{}; monitor.cbSize=sizeof(monitor);
     GetMonitorInfoW(MonitorFromWindow(owner,MONITOR_DEFAULTTONEAREST),&monitor);

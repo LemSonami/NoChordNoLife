@@ -35,8 +35,8 @@ inline Gdiplus::RectF fit_button_artwork(Gdiplus::RectF bounds,int source_width,
     return {bounds.X+(bounds.Width-width)*0.5f,bounds.Y+(bounds.Height-height)*0.5f,width,height};
 }
 
-// Authored lettering is part of the PNG. Trim only transparent canvas margins
-// when displaying; never center-crop lettering or reopen the source while painting.
+
+
 class ButtonArtwork {
     friend struct ButtonArtworkTestAccess;
     std::unique_ptr<Gdiplus::Bitmap> pixels,scaled;
@@ -65,8 +65,8 @@ public:
         for (int y=0;y<height;++y) {
             const auto row=static_cast<const BYTE*>(data.Scan0)+y*data.Stride;
             for (int x=0;x<width;++x) {
-                // Ignore almost-transparent export speckles (<=3% opacity),
-                // otherwise stray pixels far away can masquerade as plaque edges.
+
+
                 if (row[x*4+3]>8) { left=std::min(left,x); top=std::min(top,y); right=std::max(right,x); bottom=std::max(bottom,y); }
             }
         }
@@ -90,10 +90,10 @@ public:
                 cache.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
                 cache.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
                 Gdiplus::ImageAttributes attributes; attributes.SetWrapMode(Gdiplus::WrapModeTileFlipXY);
-                // Uniformly fit the actual non-transparent plaque, not its canvas.
-                // A mismatched replacement must leave transparent margins, never
-                // squash the lettering. Compensate cache pixel rounding so its
-                // final logical drawing still uses exactly one uniform scale.
+
+
+
+
                 Gdiplus::RectF fitted((content.X-bounds.X)*width/bounds.Width,(content.Y-bounds.Y)*height/bounds.Height,
                     content.Width*width/bounds.Width,content.Height*height/bounds.Height);
                 if (cache.DrawImage(pixels.get(),fitted,static_cast<float>(crop.X),static_cast<float>(crop.Y),
@@ -112,7 +112,7 @@ public:
         Gdiplus::ImageAttributes attributes; attributes.SetColorMatrix(&matrix);
         auto result=graphics.DrawImage(scaled.get(),bounds,0,0,width,height,Gdiplus::UnitPixel,&attributes);
         if (selected) {
-            // Selection is an outline, not another text layer or a regenerated image.
+
             Gdiplus::Pen edge(Gdiplus::Color(255,184,245,194),2.0f);
             float radius=std::min(10.0f,content.Height*0.23f),d=radius*2;
             Gdiplus::GraphicsPath outline;

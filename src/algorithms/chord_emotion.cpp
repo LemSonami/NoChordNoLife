@@ -1,5 +1,4 @@
 #include "chord_algorithms.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cmath>

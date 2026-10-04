@@ -123,7 +123,7 @@ void PresetStore::persist_order() {
 }
 std::size_t PresetStore::save(const std::wstring& name,const std::vector<unsigned char>& midi) {
     auto file=valid_name(name)+L".mid";
-    parse_midi_rhythm(midi); // Never save an empty/corrupt MIDI that cannot be loaded back.
+    parse_midi_rhythm(midi);
     write_bytes(directory+L"\\"+file,midi,CREATE_NEW);
     entries.push_back(file); persist_order(); return entries.size()-1;
 }
@@ -148,7 +148,7 @@ void PresetStore::recycle(std::size_t index,HWND owner) {
         throw std::runtime_error("这个预设已不存在或不是普通 MIDI 文件，请刷新列表。");
     }
     DeletedPreset deleted={entries.at(index),read_bytes(path(index),true),index};
-    deletion_history.reserve(21); // Allocate before deleting; never lose a successful delete to allocation failure.
+    deletion_history.reserve(21);
     std::wstring file=path(index); file.push_back(L'\0'); file.push_back(L'\0');
     SHFILEOPSTRUCTW operation{}; operation.hwnd=owner; operation.wFunc=FO_DELETE;
     operation.pFrom=file.c_str(); operation.fFlags=FOF_ALLOWUNDO|FOF_NOCONFIRMATION|FOF_SILENT|FOF_NOERRORUI;
@@ -166,13 +166,13 @@ int PresetStore::undo_recycle() {
     const auto position=std::min(deleted.position,restored.size());
     restored.insert(restored.begin()+position,deleted.file);
     const auto file=directory+L"\\"+deleted.file;
-    // CREATE_NEW is deliberate: never overwrite a same-name preset created since deletion.
+
     write_bytes(file,deleted.midi,CREATE_NEW);
     entries.swap(restored);
     try { persist_order(); }
     catch (...) {
         entries.swap(restored);
-        DeleteFileW(file.c_str()); // Roll back only the file this restore just created.
+        DeleteFileW(file.c_str());
         throw;
     }
     deletion_history.pop_back();
@@ -402,8 +402,8 @@ void layout(HWND window) {
         DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,library->font_name.c_str());
     SendMessageW(library->editor,WM_SETFONT,reinterpret_cast<WPARAM>(library->edit_font),TRUE);
     SendMessageW(library->renamer,WM_SETFONT,reinterpret_cast<WPARAM>(library->rename_font),TRUE);
-    // A native single-line EDIT cannot vertically align via EM_SETRECT. Instead
-    // center its measured text-height rectangle inside the parent-painted field.
+
+
     HDC dc=GetDC(library->editor); HGDIOBJ previous=SelectObject(dc,library->edit_font);
     TEXTMETRICW metrics{}; GetTextMetricsW(dc,&metrics); SelectObject(dc,previous); ReleaseDC(library->editor,dc);
     int field_height=static_cast<int>(50*library->scale),text_height=std::min(field_height,static_cast<int>(metrics.tmHeight)+2);
@@ -605,7 +605,7 @@ void open_preset_library(HWND owner,const std::wstring& directory,const std::wst
     const std::wstring& button_directory) {
     if (preset_library_window()) { ShowWindow(preset_library_window(),SW_RESTORE); SetForegroundWindow(preset_library_window()); return; }
     try {
-        // Keep deletion undo available when the same library is closed/reopened.
+
         auto resolved=absolute_path(directory);
         std::unique_ptr<PresetStore> previous;
         if (library && lstrcmpiW(library->store_directory.c_str(),resolved.c_str())==0) {

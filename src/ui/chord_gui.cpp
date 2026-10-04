@@ -8,7 +8,6 @@
 #include <gdiplus.h>
 #include <mmsystem.h>
 #include <shellapi.h>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -22,7 +21,6 @@
 #include <fstream>
 #include <iterator>
 #include <set>
-
 #include "../algorithms/chord_algorithms.hpp"
 #include "../generation/chord_generator.hpp"
 #include "../config/progression_config.hpp"
@@ -177,7 +175,7 @@ ncnl::GeneratedProgression displayed_progression{
 ncnl::MidiRhythm rhythm{
 };
 std::vector<bool> rhythm_splits(3,true);
-struct ChordBlock { std::size_t first,last; }; // last 是不包含的右端事件索引。
+struct ChordBlock { std::size_t first,last; };
 std::vector<ChordBlock> chord_blocks;
 int dragged_midi_event=-1;
 int roll_low_pitch=60;
@@ -185,7 +183,7 @@ int roll_high_pitch=71;
 ULONGLONG playback_start_ms=0;
 double playback_loop_ms=0.0;
 struct DissolvingNote {
-    Gdiplus::RectF bounds; // Logical coordinates: scale only when rendering.
+    Gdiplus::RectF bounds;
     ULONGLONG born;
     unsigned seed;
     bool alternate;
@@ -292,7 +290,7 @@ Gdiplus::RectF visual_note_bounds(const ncnl::RhythmEvent& event,int pitch) {
 }
 
 void start_note_dissolve(std::size_t event,int pitch) {
-    // Bound the animation cost even when a long imported block is erased at once.
+
     if (dissolving_notes.size()>=64) { dissolving_notes.erase(dissolving_notes.begin()); }
     auto born=monotonic_ms();
     dissolving_notes.push_back({visual_note_bounds(rhythm.events[event],pitch),born,
@@ -340,9 +338,9 @@ void CALLBACK animation_clock_callback(UINT,UINT,DWORD_PTR target,DWORD_PTR,DWOR
 
 void stop_animation_clock() {
     if (animation_clock) { timeKillEvent(animation_clock); animation_clock=0; }
-    KillTimer(main_window,PLAYBACK_TIMER); // fallback timer, if the multimedia timer failed
+    KillTimer(main_window,PLAYBACK_TIMER);
     if (animation_period_active) { timeEndPeriod(1); animation_period_active=false; }
-    // A stopped clock must not leave stale posts behind when a new effect starts.
+
     if (main_window) {
         MSG stale{};
         while (PeekMessageW(&stale,main_window,WM_ANIMATION_FRAME,WM_ANIMATION_FRAME,PM_REMOVE)) {}
@@ -531,13 +529,13 @@ void initialize_emotion_animation(std::size_t index,ULONGLONG now) {
             property->type==PropertyTagTypeLong && property->value && property->length/sizeof(ULONG)>=count) {
             auto delays=static_cast<const ULONG*>(property->value);
             for (UINT frame=0;frame<count;++frame) {
-                // GIF delays are hundredths of a second; guard zero-delay busy loops.
+
                 animation.delays[frame]=std::max<ULONGLONG>(10,static_cast<ULONGLONG>(delays[frame])*10);
             }
         }
     }
     for (auto delay:animation.delays) { animation.cycle+=delay; }
-    // Decode and shrink once at load time instead of decoding full GIFs on the UI thread.
+
     float side=static_cast<float>(std::min(image->GetWidth(),image->GetHeight()));
     for (UINT frame=0;frame<count;++frame) {
         if (image->SelectActiveFrame(&Gdiplus::FrameDimensionTime,frame)!=Gdiplus::Ok) {
@@ -559,7 +557,7 @@ bool advance_emotion_animation(std::size_t index,ULONGLONG now) {
     auto& animation=emotion_animations[index];
     if (animation.delays.empty() || now<animation.next_frame) { return false; }
     UINT old_frame=animation.frame;
-    // Skip whole cycles after a busy UI interval, without replaying queued frames.
+
     animation.next_frame+=(now-animation.next_frame)/animation.cycle*animation.cycle;
     while (now>=animation.next_frame) {
         animation.frame=(animation.frame+1)%animation.delays.size();
@@ -833,7 +831,7 @@ int keyboard_pitch_at_client_point(HWND window,POINT point) {
     double x=0,y=0;
     piano_logical_point(window,point,x,y);
     if (x<50 || x>=132 || y<347 || y>=645) { return -1; }
-    // Overlay black keys take precedence; the exposed right-hand area is a white key.
+
     for (int pitch=roll_low_pitch;pitch<=roll_high_pitch;++pitch) {
         if (is_black_key(pitch) && keyboard_key_bounds(pitch).Contains(
             static_cast<float>(x),static_cast<float>(y))) { return pitch; }
@@ -1051,7 +1049,7 @@ MMRESULT open_shared_midi_output() {
     HMIDIOUT opened=nullptr;
     MMRESULT result=midi_output_api.open(&opened,MIDI_MAPPER,0,0,CALLBACK_NULL);
     if (result!=MMSYSERR_NOERROR) {
-        // A missing/broken mapper does not necessarily mean there is no usable device.
+
         UINT count=midi_output_api.count();
         for (UINT id=0;id<count && result!=MMSYSERR_NOERROR;++id) {
             opened=nullptr;
@@ -1060,8 +1058,8 @@ MMRESULT open_shared_midi_output() {
     }
     if (result==MMSYSERR_NOERROR) {
         shared_midi_output=opened;
-        send_midi_message(opened,0xC0u); // progression: channel 0, piano
-        send_midi_message(opened,0xC1u); // audition: channel 1, piano
+        send_midi_message(opened,0xC0u);
+        send_midi_message(opened,0xC1u);
     }
     return result;
 }
@@ -1126,7 +1124,7 @@ DWORD WINAPI midi_playback_procedure(LPVOID parameter) {
     std::unique_ptr<MidiPlaybackData> data(
         static_cast<MidiPlaybackData*>(parameter)
     );
-    // General MIDI program 0：Acoustic Grand Piano。
+
     send_midi_message(data->output,0xC0u);
     struct ScheduledNote { double beat; int pitch,velocity; bool on; };
     std::vector<ScheduledNote> schedule;
@@ -1155,7 +1153,7 @@ DWORD WINAPI midi_playback_procedure(LPVOID parameter) {
         }
         ++loop;
     }
-    // Stop only the progression channel; keep channel 1 and the shared port alive.
+
     send_midi_message(data->output,0xB0u|(64u<<8));
     send_midi_message(data->output,0xB0u|(123u<<8));
     send_midi_message(data->output,0xB0u|(120u<<8));
@@ -1235,8 +1233,8 @@ void generate_and_show(HWND owner) {
         }
         for (std::size_t position=0;position<chord_blocks.size();++position) {
             constraints[position].emotion_preset=slot_presets[position];
-            // 只重新生成已清空的位置；如果所有分块都有和弦，则把这次操作
-            // 解释为“全部重新生成”。
+
+
             constraints[position].fixed_notes=all_chords_filled
                 ? ""
                 : displayed_progression.chords[position].notes;
@@ -1388,7 +1386,7 @@ bool create_midi_note_at_client_point(HWND window,POINT point) {
     int rows=roll_high_pitch-roll_low_pitch+1;
     int pitch=roll_high_pitch-std::min(rows-1,static_cast<int>((y-347)/(298.0/rows)));
     double beat=(x-132)/818*rhythm.length;
-    // A blank pitch lane at an existing attack inherits that attack's exact timing.
+
     for (std::size_t i=0;i<rhythm.events.size();++i) {
         auto& event=rhythm.events[i];
         if (beat>=event.start && beat<event.start+event.duration) {
@@ -1403,7 +1401,7 @@ bool create_midi_note_at_client_point(HWND window,POINT point) {
             return true;
         }
     }
-    // Rest-area clicks add a sixteenth-note attack, clipped to its neighbours.
+
     std::size_t insertion=0;
     while (insertion<rhythm.events.size() && rhythm.events[insertion].start<beat) { ++insertion; }
     double previous_end=insertion ? rhythm.events[insertion-1].start+rhythm.events[insertion-1].duration : 0;
@@ -1417,7 +1415,7 @@ bool create_midi_note_at_client_point(HWND window,POINT point) {
     discard_note_effects();
     remember_edit();
     rhythm.events.insert(rhythm.events.begin()+insertion,{start,end-start,96,{pitch}});
-    // Retain all existing group settings and assign the new attack to its time region.
+
     ++chord_blocks[block].last;
     for (std::size_t i=block+1;i<chord_blocks.size();++i) {
         ++chord_blocks[i].first; ++chord_blocks[i].last;
@@ -1605,7 +1603,7 @@ void toggle_rhythm_split(HWND window,POINT point,bool sweep=false) {
     if (boundary<0) { return; }
     if (middle_dragging && !middle_visited.insert(static_cast<std::size_t>(boundary)).second) { return; }
     if (rhythm_splits[static_cast<std::size_t>(boundary)]) {
-        if (sweep) { return; } // A held middle button adds boundaries; it never toggles them repeatedly.
+        if (sweep) { return; }
         merge_rhythm_boundary(static_cast<std::size_t>(boundary));
         return;
     }
@@ -1728,11 +1726,11 @@ void continue_header_drag(HWND window) {
     mouse_feedback.clear(); update_animation_clock();
     if (block>=chord_blocks.size()) { return; }
     try {
-        // Every title is a drag handle for the entire roll, not a block export.
+
         if (!std::any_of(rhythm.events.begin(),rhythm.events.end(),
             [](const ncnl::RhythmEvent& event){ return !event.pitches.empty(); })) { return; }
         auto bytes=ncnl::encode_midi(rhythm,BPM);
-        std::wstring name=utf8_to_wide(current_mode)+L"_Progression";
+        std::wstring name=utf8_to_wide(current_mode)+L"_和弦进行";
         DWORD effect=DROPEFFECT_NONE;
         HRESULT result=header_file_export(bytes,name,&effect,nullptr);
         if (FAILED(result)) {
@@ -1935,8 +1933,8 @@ void draw_piano_roll(
 
     }
 
-    // White keys extend beneath the overlay black keys, as on a real piano.
-    // Chromatic lanes retain subtle alternating fills, without horizontal/vertical grid lines.
+
+
     Gdiplus::SolidBrush keyboard_base(Gdiplus::Color(255,226,230,236));
     graphics.FillRectangle(&keyboard_base,left,grid_top,keyboard_width,grid_height);
     for (int pass=0;pass<2;++pass) {
@@ -2025,7 +2023,7 @@ void draw_piano_roll(
     Gdiplus::Pen outline(Gdiplus::Color(255,165,180,205),2.0f*scale);
     graphics.DrawPath(&outline,&rounded);
 
-    // 中键可切换任意相邻节奏事件间的分块，未分块处使用低亮度刻度。
+
     for (std::size_t i=1;i<rhythm.events.size();++i) {
         float boundary=static_cast<float>(timeline_x(event_boundary(i)));
         if (!rhythm_splits[i-1]) {
@@ -2124,7 +2122,7 @@ void draw_background(HWND window,HDC dc,bool draw_details,bool draw_emotion_imag
     );
     graphics.FillRectangle(&base,0,0,width,height);
 
-    // 拖拽期间只绘制轻量底色；背景缩放和卡片布局在鼠标松开后统一重绘。
+
     if (!draw_details) {
         return;
     }
@@ -2210,7 +2208,7 @@ Gdiplus::PointF radial_particle_position(const Gdiplus::RectF& bounds,float angl
 
 Gdiplus::PointF playback_particle_position(const Gdiplus::RectF& bounds,
     unsigned seed,unsigned spark,unsigned count,float angle,float distance) {
-    // Spread emission sites across the whole note, then radiate from each site.
+
     float u=(spark+particle_random(seed+spark*67))/count;
     float v=particle_random(seed+spark*79);
     return Gdiplus::PointF(bounds.X+bounds.Width*u+std::cos(angle)*distance,
@@ -2256,7 +2254,7 @@ void draw_dissolve_overlay(HDC dc) {
         const auto& box=note.bounds;
         float fade=(1.0f-age)*(1.0f-age);
         float drift=1.0f-std::pow(1.0f-age,3.0f);
-        // The original silhouette rapidly dissolves; fragments inherit its exact rectangle.
+
         if (note.arrow && arrow_image && age<0.5f) {
             Gdiplus::ColorMatrix matrix={1,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,1-age*2,0,0,0,0,0,1};
             Gdiplus::ImageAttributes attributes; attributes.SetColorMatrix(&matrix);
@@ -2434,8 +2432,8 @@ void draw_square_button_content(const DRAWITEMSTRUCT* item) {
     bool pressed=(item->itemState&ODS_SELECTED)!=0;
     int id=static_cast<int>(item->CtlID);
 
-    // Owner-drawn BUTTON 的未绘制区域会保留系统按钮底色。先把父窗口在
-    // 对应位置的背景绘入控件 DC，圆角之外才能真正透出背景图。
+
+
     POINT control_origin={0,0};
     ClientToScreen(item->hwndItem,&control_origin);
     ScreenToClient(main_window,&control_origin);
@@ -2535,7 +2533,7 @@ void draw_square_button_content(const DRAWITEMSTRUCT* item) {
 }
 
 void draw_square_button(const DRAWITEMSTRUCT* item) {
-    // Compose the animated icon and transparent corners off-screen in one pass.
+
     int width=item->rcItem.right-item->rcItem.left;
     int height=item->rcItem.bottom-item->rcItem.top;
     HDC buffer=CreateCompatibleDC(item->hDC);
@@ -2631,16 +2629,16 @@ const std::array<std::size_t,5> RADAR_TO_WEIGHT={{
 }};
 
 const std::array<Gdiplus::PointF,5> RADAR_VERTICES={{
-    // 取外层边线与径向粗线的交点，避开向外延伸的笔锋。
-    // 原图约 (720,176)、(1329,582)，映射到 (70,20,660,660)。
+
+
     Gdiplus::PointF(398.0f,100.0f),
     Gdiplus::PointF(675.0f,285.0f),
     Gdiplus::PointF(587.0f,639.0f),
-    // 按 idea/map.png 的红线校准：原图约 (352,1300)/1450，
-    // 映射到图片区域 (70,20,660,660) 后为 (230,612)。
-    // 此端点由轴线绘制、权重点插值和鼠标拖动投影共用。
+
+
+
     Gdiplus::PointF(230.0f,612.0f),
-    // 声部运动：原图左侧交点约 (112,582)。
+
     Gdiplus::PointF(121.0f,285.0f),
 }};
 const Gdiplus::PointF RADAR_CENTER(400.0f,375.0f);
@@ -2801,8 +2799,8 @@ void draw_configuration_contents(HWND window,HDC dc,bool composite=true) {
     graphics.ScaleTransform(transform.scale,transform.scale);
 
     if (configuration_tab==CONFIG_TAB_RADAR) {
-        // The original calibrated chart is a separate foreground layer. The new
-        // forest skin remains the window's large background underneath it.
+
+
         if (!pentagon_image.draw(graphics,{70,20,660,660})) {
             Gdiplus::Pen grid_pen(Gdiplus::Color(115,181,207,180),1.2f);
             for (int ring=1;ring<=4;++ring) {
@@ -2950,8 +2948,8 @@ int nearest_radar_axis(const Gdiplus::PointF& point) {
         return nearest;
     }
 
-    // 当若干权重为 0 时，它们的点会重叠在中心；此时也允许直接点击
-    // 对应轴线来选中该维度，避免零权重点无法再次被单独拉出。
+
+
     best_distance=18.0f*18.0f;
     for (int axis=0;axis<5;++axis) {
         const auto& vertex=RADAR_VERTICES[static_cast<std::size_t>(axis)];
@@ -3105,7 +3103,7 @@ LRESULT CALLBACK configuration_window_procedure(
             if (delta>180) { delta-=360; } if (delta<-180) { delta+=360; }
             if (std::abs(delta)>0.2) { wheel_moved=true; }
             wheel_rotation+=delta; wheel_press_angle=angle; pending_tonic=FIFTHS[wheel_top_index()];
-            return 0; // Coalesced high-precision frame clock paints the latest pointer state.
+            return 0;
         }
         if (dragged_weight_axis>=0 && GetCapture()==window) {
             update_dragged_weight(window,configuration_logical_point(window,l_param));
@@ -3579,7 +3577,7 @@ LRESULT CALLBACK window_procedure(
     }
 
     case WM_CONTEXTMENU: {
-        // 鼠标右键清除已在按下/移动时执行；松开时不再重复清除。
+
         if (l_param!=-1) {
             return 0;
         }
@@ -3658,7 +3656,7 @@ LRESULT CALLBACK window_procedure(
     return DefWindowProcW(window,message,w_param,l_param);
 }
 
-}  // namespace
+}
 
 int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
     using SetProcessDpiAwareFunction=BOOL (WINAPI*)();
