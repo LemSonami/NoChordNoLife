@@ -28,10 +28,10 @@ struct Reader {
             unsigned b=byte(); value=(value<<7)|(b&127);
             if (!(b&128)) { return value; }
         }
-        throw std::runtime_error("MIDI 的变长整数无效。");
+        throw std::runtime_error("MIDI 的变长整数无效…");
     }
     void skip(std::size_t length) {
-        if (length>end-pos) { throw std::runtime_error("MIDI 事件长度无效。"); }
+        if (length>end-pos) { throw std::runtime_error("MIDI 长度无效…"); }
         pos+=length;
     }
     bool tag(const char* text) {
@@ -52,29 +52,29 @@ void vlq(std::vector<unsigned char>& out,unsigned value) {
 
 MidiRhythm parse_midi_rhythm(const std::vector<unsigned char>& bytes) {
     Reader file{bytes,0,bytes.size()};
-    if (!file.tag("MThd")) { throw std::runtime_error("请选择标准 MIDI 文件（.mid/.midi）。"); }
+    if (!file.tag("MThd")) { throw std::runtime_error("请选择标准MIDI文件（后缀为.mid或.midi哟）"); }
     unsigned header=file.number(4);
-    if (header<6 || header>file.end-file.pos) { throw std::runtime_error("MIDI 文件头无效。"); }
+    if (header<6 || header>file.end-file.pos) { throw std::runtime_error("MIDI文件头无效…"); }
     unsigned format=file.number(2),tracks=file.number(2),division=file.number(2);
-    if (format>1 || !tracks) { throw std::runtime_error("当前支持同步的 MIDI Type 0 和 Type 1。"); }
-    if ((division&0x8000) || !division) { throw std::runtime_error("请使用按拍计时（PPQN）的 MIDI 文件。"); }
+    if (format>1 || !tracks) { throw std::runtime_error("当前支持同步的 MIDI Type 0 和 Type 1"); }
+    if ((division&0x8000) || !division) { throw std::runtime_error("请使用按拍计时的MIDI文件…"); }
     file.skip(header-6);
     std::vector<Note> notes;
     std::uint64_t file_end=0;
     for (unsigned track=0;track<tracks;++track) {
-        if (!file.tag("MTrk")) { throw std::runtime_error("MIDI 轨道头无效。"); }
+        if (!file.tag("MTrk")) { throw std::runtime_error("MIDI头无效…"); }
         unsigned length=file.number(4);
-        if (length>file.end-file.pos) { throw std::runtime_error("MIDI 轨道长度无效。"); }
+        if (length>file.end-file.pos) { throw std::runtime_error("MIDI长度无效…"); }
         Reader input{bytes,file.pos,file.pos+length}; file.skip(length);
         std::map<int,std::deque<std::pair<std::uint64_t,int>>> active;
         std::uint64_t tick=0;
         unsigned running=0;
         while (input.pos<input.end) {
             tick+=input.vlq();
-            if (tick>0x0fffffff) { throw std::runtime_error("MIDI 时间范围过大。"); }
+            if (tick>0x0fffffff) { throw std::runtime_error("MIDI时间范围太大啦…"); }
             unsigned status=input.byte();
             if (status<128) {
-                if (!running) { throw std::runtime_error("MIDI running status 无效。"); }
+                if (!running) { throw std::runtime_error("MIDI状态无效…"); }
                 --input.pos; status=running;
             }
             if (status==255) {
@@ -86,12 +86,12 @@ MidiRhythm parse_midi_rhythm(const std::vector<unsigned char>& bytes) {
             if (status==240 || status==247) {
                 running=0; input.skip(input.vlq()); continue;
             }
-            if (status<128 || status>=240) { throw std::runtime_error("不支持的 MIDI 事件。"); }
+            if (status<128 || status>=240) { throw std::runtime_error("不支持的MIDI TAT"); }
             running=status;
             unsigned kind=status&240,channel=status&15;
             unsigned pitch=input.byte();
             unsigned value=(kind==192 || kind==208) ? 0 : input.byte();
-            if (pitch>127 || value>127) { throw std::runtime_error("MIDI 数据字节无效。"); }
+            if (pitch>127 || value>127) { throw std::runtime_error("MIDI数据无效…"); }
             int key=static_cast<int>(channel*128+pitch);
             if (kind==144 && value) {
                 active[key].push_back({tick,static_cast<int>(value)});
@@ -111,8 +111,7 @@ MidiRhythm parse_midi_rhythm(const std::vector<unsigned char>& bytes) {
             }
         }
     }
-    if (notes.empty()) { throw std::runtime_error("MIDI 中没有可导入的音符。"); }
-    // 扫描全部轨道的音符边界：每个时间片只保留最低的活动音符。
+    if (notes.empty()) { throw std::runtime_error("MIDI中没有可导入的音符！！！"); }
     struct Edge { std::uint64_t time; std::size_t note; bool on; };
     std::vector<Edge> edges;
     for (std::size_t i=0;i<notes.size();++i) {
@@ -152,7 +151,7 @@ std::vector<unsigned char> encode_midi(const MidiRhythm& rhythm,int bpm) {
     constexpr unsigned ppqn=480;
     const double max_beats=0x0fffffff/static_cast<double>(ppqn);
     if (!std::isfinite(rhythm.length) || rhythm.length<=0 || rhythm.length>max_beats) {
-        throw std::runtime_error("节奏长度超出 MIDI 导出范围。");
+        throw std::runtime_error("节奏长度超出了MIDI导出范围qwq");
     }
     struct Event { unsigned tick; int pitch,velocity; bool on; };
     std::vector<Event> events;
@@ -160,12 +159,12 @@ std::vector<unsigned char> encode_midi(const MidiRhythm& rhythm,int bpm) {
         if (!std::isfinite(note.start) || !std::isfinite(note.duration) ||
             note.start<0 || note.duration<=0 || note.start+note.duration>rhythm.length ||
             note.velocity<1 || note.velocity>127) {
-            throw std::runtime_error("节奏事件的时间或力度无效。");
+            throw std::runtime_error("节奏的时间范围或力度无效…");
         }
         unsigned start=static_cast<unsigned>(std::llround(note.start*ppqn));
         unsigned end=std::max(start+1,static_cast<unsigned>(std::llround((note.start+note.duration)*ppqn)));
         for (int pitch:note.pitches) {
-            if (pitch<0 || pitch>127) { throw std::runtime_error("MIDI 音高超出范围。"); }
+            if (pitch<0 || pitch>127) { throw std::runtime_error("MIDI音高超出范围…"); }
             events.push_back({start,pitch,note.velocity,true});
             events.push_back({end,pitch,0,false});
         }

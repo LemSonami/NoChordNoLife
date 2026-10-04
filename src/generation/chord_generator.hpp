@@ -1,5 +1,4 @@
 #pragma once
-
 #include <array>
 #include <string>
 #include <vector>
@@ -37,4 +36,4 @@ GeneratedProgression generate_progression(
         std::vector<ChordConstraint>(constraints.begin(),constraints.end()));
 }
 
-}  // namespace ncnl
+}

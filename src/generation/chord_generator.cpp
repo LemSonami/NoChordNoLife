@@ -1,8 +1,6 @@
 #include "chord_generator.hpp"
 #include "../midi/piano_roll_notes.hpp"
-
 #include "../algorithms/chord_algorithms.hpp"
-
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -24,17 +22,17 @@ const std::array<const char*,12> NOTE_NAMES={{
 }};
 
 const std::vector<std::vector<int>> CHORD_SHAPES={
-    {0,4,7},       // major
-    {0,3,7},       // minor
-    {0,3,6},       // diminished
-    {0,4,8},       // augmented
-    {0,2,7},       // sus2
-    {0,5,7},       // sus4
-    {0,4,7,10},    // dominant7
-    {0,4,7,11},    // major7
-    {0,3,7,10},    // minor7
-    {0,3,6,10},    // half diminished7
-    {0,3,6,9},     // diminished7
+    {0,4,7},       //Major
+    {0,3,7},       //minor
+    {0,3,6},       //dim
+    {0,4,8},       //aug
+    {0,2,7},       //sus2
+    {0,5,7},       //sus4
+    {0,4,7,10},    //7
+    {0,4,7,11},    //M7
+    {0,3,7,10},    //m7
+    {0,3,6,10},    //half dim7
+    {0,3,6,9},     //dim7
 };
 
 struct Candidate {
@@ -181,7 +179,7 @@ GeneratedProgression generate_progression(
     const std::vector<ChordConstraint>& constraints
 ) {
     if (constraints.empty()) {
-        throw std::invalid_argument("请先导入节奏或创建和弦分块。");
+        throw std::invalid_argument("请先导入节奏或创建和弦分块捏~");
     }
     const std::size_t count=constraints.size();
     // 先让原算法验证调式格式，再构建候选库。
@@ -208,7 +206,7 @@ GeneratedProgression generate_progression(
             std::ostringstream error;
             error<<"第 "<<position+1<<" 个和弦的情感预设 "
                  <<emotion_preset_label(constraints[position].emotion_preset)
-                 <<" 在当前调式下没有候选。";
+                 <<" 啊哦…在当前调式下没有候选…";
             throw std::runtime_error(error.str());
         }
     }
@@ -222,7 +220,6 @@ GeneratedProgression generate_progression(
     constexpr int SAMPLE_COUNT=6000;
     std::vector<Trial> trials;
     trials.reserve(SAMPLE_COUNT);
-    // 各分块复用同一衔接缓存，分块数量增加时仍避免重复计算。
     std::map<std::pair<unsigned int,unsigned int>,double> transition_cache;
     std::vector<std::discrete_distribution<std::size_t>> choices;
     for (const auto& pool:pools) {
@@ -233,7 +230,7 @@ GeneratedProgression generate_progression(
 
     for (int sample=0;sample<SAMPLE_COUNT;++sample) {
         Trial trial{};
-        trial.preference=0.0; // Log-space keeps long progressions numerically stable.
+        trial.preference=0.0;
         trial.choices.resize(count);
         for (std::size_t position=0;position<count;++position) {
             trial.choices[position]=choices[position](random_engine);
@@ -258,7 +255,6 @@ GeneratedProgression generate_progression(
             transition_total+=cached->second;
             repeated_chords+=count>1 && current.pitch_mask==next.pitch_mask;
         }
-        // 循环进行包含尾→头；重复惩罚按分块数量归一化，保持四块时的原行为。
         trial.quality=transition_total/count-56.0*repeated_chords/count;
         trials.push_back(trial);
     }
@@ -272,9 +268,8 @@ GeneratedProgression generate_progression(
         }
     }
     if (eligible_unique.empty()) {
-        throw std::runtime_error("此次采样未找到进行质量大于 65 且小于 90 的结果。请调整分块、情感预设或行进权重后重试。");
+        throw std::runtime_error("未找到合适的进行，果咩内…");
     }
-    // Prefer modal, fuller voicings over a slightly higher progression score.
     std::vector<double> result_weights;
     double best_preference=eligible_unique.front()->preference;
     for (auto trial:eligible_unique) { best_preference=std::max(best_preference,trial->preference); }

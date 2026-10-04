@@ -1,12 +1,10 @@
 #pragma once
-
 #include "../algorithms/chord_algorithms.hpp"
 #include <algorithm>
 #include <sstream>
 
 namespace ncnl{
 
-// 卷帘编辑允许空音组和单音；两个及以上音仍使用原算法评分
 inline Chord parse_roll_notes(const std::string& text) {
     Chord notes;
     std::istringstream input(text);
