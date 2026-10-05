@@ -8,6 +8,7 @@
 #include <gdiplus.h>
 #include <algorithm>
 #include <cmath>
+#include "../resources/embedded_assets.hpp"
 
 namespace ncnl {
 namespace {
@@ -25,7 +26,7 @@ LRESULT CALLBACK overlay_procedure(HWND window,UINT message,WPARAM w,LPARAM l) {
 void MouseFeedback::initialize(HWND host,const std::wstring& directory) {
     shutdown(); owner=host;
     const wchar_t* names[4]={L"Link.ani",L"Vertical Resize.ani",L"Unavailable.ani",L"Text Select.ani"};
-    for (int i=0;i<4;++i) { cursors[i]=LoadCursorFromFileW((directory+L"\\"+names[i]).c_str()); }
+    for (int i=0;i<4;++i) { cursors[i]=asset_cursor(directory+L"/"+names[i]); }
 }
 HCURSOR MouseFeedback::cursor(AppCursor kind) const {
     int index=static_cast<int>(kind);

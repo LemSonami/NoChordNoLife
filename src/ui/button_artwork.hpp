@@ -6,6 +6,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include "../resources/embedded_assets.hpp"
 
 namespace ncnl {
 
@@ -38,18 +39,18 @@ inline Gdiplus::RectF fit_button_artwork(Gdiplus::RectF bounds,int source_width,
 
 
 class ButtonArtwork {
-    friend struct ButtonArtworkTestAccess;
     std::unique_ptr<Gdiplus::Bitmap> pixels,scaled;
     Gdiplus::Rect crop;
     int cached_width=0,cached_height=0;
     float cached_logical_width=0,cached_logical_height=0;
-    unsigned cache_builds=0;
 public:
     explicit operator bool() const { return static_cast<bool>(pixels); }
-    void reset() { scaled.reset(); pixels.reset(); cached_width=cached_height=0; cached_logical_width=cached_logical_height=0; cache_builds=0; }
-    bool load(const std::wstring& path) {
+    Gdiplus::Size visible_size() const { return pixels ? Gdiplus::Size(crop.Width,crop.Height) : Gdiplus::Size(0,0); }
+    void reset() { scaled.reset(); pixels.reset(); cached_width=cached_height=0; cached_logical_width=cached_logical_height=0; }
+    bool load(const std::wstring& path,bool strict_alpha=false) {
         reset();
-        Gdiplus::Image source(path.c_str());
+        auto image=asset_image(path); if (!image) { return false; }
+        auto& source=*image;
         if (source.GetLastStatus()!=Gdiplus::Ok || !source.GetWidth() || !source.GetHeight() ||
             source.GetWidth()>8192 || source.GetHeight()>8192) { return false; }
         int width=static_cast<int>(source.GetWidth()),height=static_cast<int>(source.GetHeight());
@@ -67,7 +68,7 @@ public:
             for (int x=0;x<width;++x) {
 
 
-                if (row[x*4+3]>8) { left=std::min(left,x); top=std::min(top,y); right=std::max(right,x); bottom=std::max(bottom,y); }
+                if (row[x*4+3]>(strict_alpha?0:8)) { left=std::min(left,x); top=std::min(top,y); right=std::max(right,x); bottom=std::max(bottom,y); }
             }
         }
         decoded->UnlockBits(&data);
@@ -101,7 +102,7 @@ public:
                     Gdiplus::UnitPixel,&attributes)!=Gdiplus::Ok) { return false; }
             }
             scaled=std::move(next); cached_width=width; cached_height=height;
-            cached_logical_width=bounds.Width; cached_logical_height=bounds.Height; ++cache_builds;
+            cached_logical_width=bounds.Width; cached_logical_height=bounds.Height;
         }
         auto state=graphics.Save(); graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
         graphics.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);

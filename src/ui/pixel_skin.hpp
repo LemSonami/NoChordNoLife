@@ -5,26 +5,26 @@
 #include <array>
 #include <memory>
 #include <string>
+#include "../resources/embedded_assets.hpp"
 
 namespace ncnl {
 
 
 
 class PixelSkin {
-    friend struct PixelSkinTestAccess;
     std::unique_ptr<Gdiplus::Bitmap> pixels,scaled;
     int cached_width=0,cached_height=0;
     float cached_opacity=-1;
-    unsigned cache_builds=0;
 public:
     explicit operator bool() const { return static_cast<bool>(pixels); }
     void reset() {
         scaled.reset(); pixels.reset(); cached_width=0; cached_height=0;
-        cached_opacity=-1; cache_builds=0;
+        cached_opacity=-1;
     }
     bool load(const std::wstring& path) {
         if (path.empty()) { return false; }
-        Gdiplus::Image source(path.c_str());
+        auto image=asset_image(path); if (!image) { return false; }
+        auto& source=*image;
         if (source.GetLastStatus()!=Gdiplus::Ok || !source.GetWidth() || !source.GetHeight() ||
             source.GetWidth()>8192 || source.GetHeight()>8192) { return false; }
         std::unique_ptr<Gdiplus::Bitmap> decoded(new Gdiplus::Bitmap(
@@ -66,7 +66,7 @@ public:
                     source_width,source_height,Gdiplus::UnitPixel,&attributes)!=Gdiplus::Ok) { return false; }
             }
             scaled=std::move(next); cached_width=width; cached_height=height;
-            cached_opacity=opacity; ++cache_builds;
+            cached_opacity=opacity;
         }
         auto state=graphics.Save();
         graphics.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);

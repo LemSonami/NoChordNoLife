@@ -19,12 +19,7 @@ public:
     bool active() const { return !particles.empty() || !trail.empty(); }
     void clear();
     void render(ULONGLONG now);
-    std::size_t particle_count() const { return particles.size(); }
-    std::size_t trail_count() const { return trail.size(); }
-    HWND overlay_window() const { return overlay; }
 private:
-    friend struct MouseFeedbackTestAccess;
-    friend struct MouseFeedbackTestAccess;
     struct TrailPoint { float x,y; ULONGLONG born; int color; unsigned stroke; };
     struct Particle { float x,y,vx,vy,radius; ULONGLONG born; int color; bool star; };
     void emit(float x,float y,int color,bool burst,float scale,ULONGLONG now);

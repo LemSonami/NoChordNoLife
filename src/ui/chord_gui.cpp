@@ -4,7 +4,6 @@
 
 #include <windows.h>
 #include <windowsx.h>
-#include <commdlg.h>
 #include <gdiplus.h>
 #include <mmsystem.h>
 #include <shellapi.h>
@@ -12,7 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cwchar>
-#include <iomanip>
+#include <cstring>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -32,6 +31,7 @@
 #include "pixel_skin.hpp"
 #include "button_artwork.hpp"
 #include "window_layout.hpp"
+#include "../plugins/plugin_manager.hpp"
 
 int BPM=120;
 
@@ -62,7 +62,6 @@ enum class FontKind {
     title,
     normal,
     card,
-    hint,
 };
 
 struct ControlLayout {
@@ -72,7 +71,6 @@ struct ControlLayout {
     int width;
     int height;
     FontKind font_kind;
-    bool combo_box;
 };
 
 std::vector<ControlLayout> controls;
@@ -81,8 +79,6 @@ HWND main_window=nullptr;
 int header_drag_block=-1;
 POINT header_drag_press={0,0},header_drag_pointer={0,0};
 ULONGLONG header_drag_started=0;
-using HeaderFileExport=HRESULT (*)(const std::vector<unsigned char>&,const std::wstring&,DWORD*,ncnl::FileDragOperation);
-HeaderFileExport header_file_export=ncnl::drag_midi_file;
 ncnl::MouseFeedback mouse_feedback;
 ncnl::MouseFeedback configuration_mouse_feedback;
 bool middle_dragging=false;
@@ -106,7 +102,6 @@ POINT preset_drag_start={0,0};
 HFONT title_font=nullptr;
 HFONT normal_font=nullptr;
 HFONT card_font=nullptr;
-HFONT hint_font=nullptr;
 double current_scale=1.0;
 bool interactive_resize=false;
 int applied_client_width=-1;
@@ -125,12 +120,18 @@ ULONG_PTR gdiplus_token=0;
 std::unique_ptr<Gdiplus::PrivateFontCollection> interface_font_collection;
 std::unique_ptr<Gdiplus::FontFamily> interface_font_family;
 std::wstring interface_font_name=L"Microsoft YaHei UI";
-std::wstring registered_font_path;
+HANDLE registered_font=nullptr;
 ncnl::PixelSkin background_image;
 ncnl::ButtonArtworks button_artworks;
 ncnl::ButtonArtwork pentagon_image;
-std::wstring background_path;
-std::array<std::unique_ptr<Gdiplus::Image>,5> emotion_images;
+ncnl::PluginManager plugin_manager;
+ncnl::ButtonArtwork ncnl_button_art,plugin_tab_art;
+std::vector<std::unique_ptr<ncnl::ButtonArtwork>> plugin_button_art;
+HWND plugin_container=nullptr;
+int plugin_scroll=0;
+void resize_plugin_page(HWND window);
+void update_plugin_interface(HWND window);
+std::array<ncnl::AssetImage,5> emotion_images;
 struct EmotionAnimation {
     std::vector<ULONGLONG> delays;
     std::vector<std::unique_ptr<Gdiplus::Bitmap>> frames;
@@ -139,11 +140,11 @@ struct EmotionAnimation {
     ULONGLONG cycle=0;
 };
 std::array<EmotionAnimation,5> emotion_animations;
-std::unique_ptr<Gdiplus::Image> arrow_image;
+ncnl::AssetImage arrow_image;
 std::string progression_config_path;
 bool configuration_interactive_resize=false;
-constexpr int CONFIG_TAB_MODE=0,CONFIG_TAB_RADAR=1;
-std::array<ncnl::PixelSkin,2> configuration_skins;
+constexpr int CONFIG_TAB_MODE=0,CONFIG_TAB_RADAR=1,CONFIG_TAB_PLUGINS=2;
+std::array<ncnl::PixelSkin,3> configuration_skins;
 int configuration_tab=CONFIG_TAB_MODE;
 constexpr UINT_PTR CONFIGURATION_TRANSITION_TIMER=73;
 ULONGLONG configuration_opened=0,configuration_switched=0,wheel_started=0;
@@ -477,37 +478,52 @@ std::wstring executable_directory() {
 
 
 
-bool load_background(const std::wstring& path) {
-    if (!background_image.load(path)) { return false; }
-    main_background_dirty=true;
-    if (main_window) {
-        InvalidateRect(main_window,nullptr,FALSE);
+void initialize_runtime_storage(const std::wstring& directory) {
+    for (const auto& name:{L"presents",L"plugins"}) {
+        auto path=directory+L"\\"+name;
+        DWORD attributes=GetFileAttributesW(path.c_str());
+        if (attributes==INVALID_FILE_ATTRIBUTES) {
+            if (!CreateDirectoryW(path.c_str(),nullptr)) { throw std::runtime_error("无法创建运行数据目录，请检查程序所在目录的写入权限。"); }
+        } else if (!(attributes&FILE_ATTRIBUTE_DIRECTORY)) {
+            throw std::runtime_error("presents 或 plugins 已被同名文件占用，请先移走该文件。");
+        }
     }
-    return true;
+    auto path=directory+L"\\config.json"; progression_config_path=wide_to_utf8(path);
+    DWORD attributes=GetFileAttributesW(path.c_str());
+    if (attributes==INVALID_FILE_ATTRIBUTES) {
+        if (GetLastError()!=ERROR_FILE_NOT_FOUND) { throw std::runtime_error("无法访问 config.json，请检查目录权限。"); }
+        ncnl::set_progression_weights(ncnl::default_progression_weights());
+        if (!ncnl::save_progression_config(progression_config_path)) { throw std::runtime_error("无法创建默认 config.json。"); }
+    } else if (!ncnl::load_progression_config(progression_config_path)) {
+        ncnl::set_progression_weights(ncnl::default_progression_weights());
+        MessageBoxW(nullptr,L"config.json 无法读取或内容无效，本次使用默认参数，原文件未改动。",L"配置提示",MB_OK|MB_ICONWARNING);
+    }
 }
 
 void load_application_skins(const std::wstring& assets) {
     const std::wstring directory=assets+L"\\skins\\";
-    background_path=directory+L"main.png";
-    background_image.reset(); load_background(background_path);
+    background_image.reset(); background_image.load(directory+L"main.png"); main_background_dirty=true;
     configuration_skins[CONFIG_TAB_MODE].reset(); configuration_skins[CONFIG_TAB_RADAR].reset();
     configuration_skins[CONFIG_TAB_MODE].load(directory+L"mode.png");
     configuration_skins[CONFIG_TAB_RADAR].load(directory+L"radar.png");
+    configuration_skins[CONFIG_TAB_PLUGINS].load(directory+L"plugins.png");
+    ncnl_button_art.load(directory+L"buttons\\ncnl.png",true);
+    plugin_tab_art.load(directory+L"buttons\\plugins_tab.png",true);
     pentagon_image.load(assets+L"\\res\\penta_dim.png");
     button_artworks.load(directory+L"buttons");
     configuration_cached_tab=-1;
 }
 
-std::unique_ptr<Gdiplus::Image> load_png(const std::wstring& path) {
-    std::unique_ptr<Gdiplus::Image> image(new Gdiplus::Image(path.c_str()));
-    if (image->GetLastStatus()!=Gdiplus::Ok ||
+ncnl::AssetImage load_png(const std::wstring& path) {
+    auto image=ncnl::asset_image(path);
+    if (!image || image->GetLastStatus()!=Gdiplus::Ok ||
         image->GetWidth()==0 || image->GetHeight()==0) {
         return {};
     }
     return image;
 }
 
-std::unique_ptr<Gdiplus::Image> load_emotion_icon(const std::wstring& base) {
+ncnl::AssetImage load_emotion_icon(const std::wstring& base) {
     auto image=load_png(base+L".gif");
     if (!image) { image=load_png(base+L".png"); }
     return image;
@@ -588,7 +604,7 @@ void update_emotion_animation_timer(bool resume=false) {
 }
 
 void load_interface_images() {
-    std::wstring root=executable_directory()+L"\\assets";
+    std::wstring root=L":/assets";
     for (int preset=0;preset<5;++preset) {
         std::wostringstream path;
         path<<root<<L"\\chord_emotion\\"<<preset+1;
@@ -615,9 +631,9 @@ void draw_square_icon(Gdiplus::Graphics& graphics,Gdiplus::Image* image,
 void unload_interface_font() {
     interface_font_family.reset();
     interface_font_collection.reset();
-    if (!registered_font_path.empty()) {
-        RemoveFontResourceExW(registered_font_path.c_str(),FR_PRIVATE,nullptr);
-        registered_font_path.clear();
+    if (registered_font) {
+        RemoveFontMemResourceEx(registered_font);
+        registered_font=nullptr;
     }
     interface_font_name=L"Microsoft YaHei UI";
 }
@@ -625,14 +641,15 @@ void unload_interface_font() {
 bool load_interface_font(const std::wstring& path) {
     unload_interface_font();
     std::unique_ptr<Gdiplus::PrivateFontCollection> collection(new Gdiplus::PrivateFontCollection);
-    if (collection->AddFontFile(path.c_str())!=Gdiplus::Ok) { return false; }
+    auto bytes=ncnl::embedded_asset(path);
+    if (!bytes.data || collection->AddMemoryFont(bytes.data,bytes.size)!=Gdiplus::Ok) { return false; }
     Gdiplus::FontFamily family;
     INT found=0;
     if (collection->GetFamilies(1,&family,&found)!=Gdiplus::Ok || !found) { return false; }
     wchar_t name[LF_FACESIZE]={};
-    if (family.GetFamilyName(name)!=Gdiplus::Ok ||
-        !AddFontResourceExW(path.c_str(),FR_PRIVATE,nullptr)) { return false; }
-    registered_font_path=path;
+    if (family.GetFamilyName(name)!=Gdiplus::Ok) { return false; }
+    DWORD count=0; registered_font=AddFontMemResourceEx(const_cast<BYTE*>(bytes.data),bytes.size,nullptr,&count);
+    if (!registered_font) { return false; }
     interface_font_name=name;
     interface_font_family.reset(family.Clone());
     interface_font_collection=std::move(collection);
@@ -652,7 +669,6 @@ void rebuild_fonts(double scale) {
     HFONT new_title=create_scaled_font(30,FW_BOLD,scale);
     HFONT new_normal=create_scaled_font(19,FW_NORMAL,scale);
     HFONT new_card=create_scaled_font(17,FW_NORMAL,scale);
-    HFONT new_hint=create_scaled_font(15,FW_NORMAL,scale);
 
     for (const auto& control:controls) {
         HFONT font=new_normal;
@@ -661,9 +677,6 @@ void rebuild_fonts(double scale) {
         }
         else if (control.font_kind==FontKind::card) {
             font=new_card;
-        }
-        else if (control.font_kind==FontKind::hint) {
-            font=new_hint;
         }
         SendMessageW(control.window,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
     }
@@ -677,16 +690,13 @@ void rebuild_fonts(double scale) {
     if (card_font) {
         DeleteObject(card_font);
     }
-    if (hint_font) {
-        DeleteObject(hint_font);
-    }
     title_font=new_title;
     normal_font=new_normal;
     card_font=new_card;
-    hint_font=new_hint;
 }
 
 void apply_layout(HWND window) {
+    resize_plugin_page(window);
     RECT client{};
     GetClientRect(window,&client);
     int client_width=client.right-client.left;
@@ -709,11 +719,8 @@ void apply_layout(HWND window) {
         int y=offset_y+static_cast<int>(std::lround(control.y*current_scale));
         int width=std::max(1,static_cast<int>(std::lround(control.width*current_scale)));
         int visible_height=std::max(1,static_cast<int>(std::lround(control.height*current_scale)));
-        int window_height=control.combo_box
-            ? std::max(visible_height,static_cast<int>(std::lround(260*current_scale)))
-            : visible_height;
         positions=DeferWindowPos(
-            positions,control.window,nullptr,x,y,width,window_height,
+            positions,control.window,nullptr,x,y,width,visible_height,
             SWP_NOZORDER|SWP_NOACTIVATE
         );
     }
@@ -751,16 +758,15 @@ HWND create_control(
     int height,
     HWND parent,
     int id,
-    FontKind font_kind=FontKind::normal,
-    bool combo_box=false
+    FontKind font_kind=FontKind::normal
 ) {
     HWND control=CreateWindowExW(
         0,class_name,text,style,
-        x,y,width,combo_box ? 260 : height,parent,
+        x,y,width,height,parent,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
         GetModuleHandleW(nullptr),nullptr
     );
-    controls.push_back({control,x,y,width,height,font_kind,combo_box});
+    controls.push_back({control,x,y,width,height,font_kind});
     return control;
 }
 
@@ -1732,7 +1738,7 @@ void continue_header_drag(HWND window) {
         auto bytes=ncnl::encode_midi(rhythm,BPM);
         std::wstring name=utf8_to_wide(current_mode)+L"_和弦进行";
         DWORD effect=DROPEFFECT_NONE;
-        HRESULT result=header_file_export(bytes,name,&effect,nullptr);
+        HRESULT result=ncnl::drag_midi_file(bytes,name,&effect,nullptr);
         if (FAILED(result)) {
             MessageBoxW(window,L"无法创建 MIDI 拖出文件或启动 Windows 文件拖放。",L"无法导出 MIDI",MB_OK|MB_ICONERROR);
         }
@@ -2089,21 +2095,95 @@ void draw_piano_roll(
     draw_centered_text(graphics,info.str(),
         Gdiplus::RectF(offset_x+50.0f*scale,offset_y+253.0f*scale,900.0f*scale,30.0f*scale),
         14.0f*scale,false,Gdiplus::Color(245,207,227,242));
-    if (progression_is_complete()) {
-        std::wostringstream quality;
-        quality<<L"进行质量 "<<std::fixed<<std::setprecision(1)
-               <<displayed_progression.quality_score;
-        draw_centered_text(
-            graphics,quality.str(),
-            Gdiplus::RectF(
-                offset_x+330.0f*scale,offset_y+945.0f*scale,
-                340.0f*scale,35.0f*scale
-            ),
-            16.0f*scale,true
-        );
-    }
 }
 
+int32_t NCNL_CALL plugin_context(void*,NcnlContextV1* context) {
+    if (!context || context->size<sizeof(NcnlContextV1)) { return 0; }
+    *context={}; context->size=sizeof(*context); context->bpm=BPM;
+    context->rhythm_events=static_cast<uint32_t>(rhythm.events.size());
+    for (const auto& event:rhythm.events) { context->midi_notes+=static_cast<uint32_t>(event.pitches.size()); }
+    std::strncpy(context->mode,current_mode.c_str(),sizeof(context->mode)-1); return 1;
+}
+uint32_t NCNL_CALL plugin_read_midi(void*,uint8_t* output,uint32_t capacity) {
+    try {
+        auto bytes=ncnl::encode_midi(rhythm,BPM);
+        if (output && capacity>=bytes.size()) { std::copy(bytes.begin(),bytes.end(),output); }
+        return static_cast<uint32_t>(bytes.size());
+    } catch (...) { return 0; }
+}
+Gdiplus::RectF plugin_button_bounds(int index,int count) {
+    float width=216,gap=12,total=count*width+(count-1)*gap;
+    return {(1000-total)*0.5f+index*(width+gap),934,width,46};
+}
+void draw_plugin_buttons(Gdiplus::Graphics& graphics,float offset_x,float offset_y,float scale) {
+    auto saved=graphics.Save(); graphics.TranslateTransform(offset_x,offset_y); graphics.ScaleTransform(scale,scale);
+    auto indices=plugin_manager.enabled_plugins();
+    for (std::size_t i=0;i<indices.size();++i) {
+        auto box=plugin_button_bounds(static_cast<int>(i),static_cast<int>(indices.size()));
+        auto index=indices[i]; bool selected=plugin_manager.active_index()==index;
+        ncnl::ButtonArtwork* art=index==0 ? &ncnl_button_art :
+            (index<plugin_button_art.size() ? plugin_button_art[index].get() : nullptr);
+        if (art && *art) {
+            auto size=art->visible_size(); float height=box.Width*size.Height/size.Width;
+            if (height<=box.Height) { box.Y+=(box.Height-height)*0.5f; box.Height=height; }
+            if (art->draw(graphics,box,selected)) { continue; }
+        }
+        Gdiplus::GraphicsPath shape; add_rounded_rectangle(shape,box,12);
+        Gdiplus::LinearGradientBrush fill(Gdiplus::PointF(box.X,box.Y),Gdiplus::PointF(box.X,box.GetBottom()),
+            selected?Gdiplus::Color(255,124,175,145):Gdiplus::Color(245,54,77,85),Gdiplus::Color(255,35,65,69));
+        Gdiplus::Pen edge(Gdiplus::Color(230,177,218,191),1.4f); graphics.FillPath(&fill,&shape); graphics.DrawPath(&edge,&shape);
+        draw_centered_text(graphics,plugin_manager.plugins()[index].name,box,20,true);
+    }
+    graphics.Restore(saved);
+}
+void resize_plugin_page(HWND window) {
+    if (!plugin_container) { return; }
+    RECT client={}; GetClientRect(window,&client);
+    double scale=std::min(client.right/1000.0,client.bottom/1000.0);
+    int width=static_cast<int>(900*scale),height=static_cast<int>(780*scale);
+    MoveWindow(plugin_container,static_cast<int>(50*scale),static_cast<int>(120*scale),width,height,TRUE);
+    plugin_manager.resize(width,height);
+}
+void update_plugin_interface(HWND window) {
+    bool builtin=plugin_manager.active_index()==0;
+    for (const auto& control:controls) {
+        if (control.window==settings_button || control.window==mode_label) { continue; }
+        ShowWindow(control.window,builtin?SW_SHOW:SW_HIDE);
+    }
+    if (plugin_container) { ShowWindow(plugin_container,builtin?SW_HIDE:SW_SHOW); }
+    resize_plugin_page(window); main_background_dirty=true;
+    RedrawWindow(window,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN);
+}
+void refresh_plugins(HWND window) {
+    std::wstring error;
+    NcnlHostV1 host={sizeof(NcnlHostV1),NCNL_PLUGIN_ABI,nullptr,plugin_context,plugin_read_midi};
+    plugin_manager.activate(0,plugin_container,host,error);
+    try {
+        plugin_manager.scan(executable_directory()+L"\\plugins");
+        plugin_button_art.clear(); plugin_button_art.resize(plugin_manager.plugins().size());
+        for (std::size_t i=1;i<plugin_button_art.size();++i) {
+            plugin_button_art[i].reset(new ncnl::ButtonArtwork);
+            plugin_button_art[i]->load(plugin_manager.plugins()[i].button);
+        }
+    } catch (const std::exception& error) { MessageBoxW(window,utf8_to_wide(error.what()).c_str(),L"插件列表读取失败",MB_OK|MB_ICONWARNING); }
+    plugin_scroll=0; configuration_cached_tab=-1; update_plugin_interface(window);
+}
+bool switch_plugin_at(HWND window,POINT point) {
+    RECT client={}; GetClientRect(window,&client); float scale=static_cast<float>(std::min(client.right/1000.0,client.bottom/1000.0));
+    if (scale<=0) { return false; }
+    auto indices=plugin_manager.enabled_plugins();
+    for (std::size_t i=0;i<indices.size();++i) {
+        if (!plugin_button_bounds(static_cast<int>(i),static_cast<int>(indices.size())).Contains(point.x/scale,point.y/scale)) { continue; }
+        cancel_header_drag(window,true); hide_chord_editor(); stop_key_preview(); dissolving_notes.clear();
+        NcnlHostV1 host={sizeof(NcnlHostV1),NCNL_PLUGIN_ABI,nullptr,plugin_context,plugin_read_midi};
+        std::wstring error;
+        if (!plugin_manager.activate(indices[i],plugin_container,host,error)) {
+            MessageBoxW(window,error.c_str(),L"插件无法加载",MB_OK|MB_ICONERROR);
+        }
+        configuration_cached_tab=-1; update_plugin_interface(window); return true;
+    }
+    return false;
+}
 void draw_background(HWND window,HDC dc,bool draw_details,bool draw_emotion_images=true) {
     RECT client{};
     GetClientRect(window,&client);
@@ -2135,9 +2215,10 @@ void draw_background(HWND window,HDC dc,bool draw_details,bool draw_emotion_imag
     ));
     float offset_x=static_cast<float>((width-DESIGN_WIDTH*scale)/2.0);
     float offset_y=static_cast<float>((height-DESIGN_HEIGHT*scale)/2.0);
-    draw_piano_roll(
+    if (plugin_manager.active_index()==0) { draw_piano_roll(
         graphics,offset_x,offset_y,static_cast<float>(scale),draw_emotion_images
-    );
+    ); }
+    draw_plugin_buttons(graphics,offset_x,offset_y,static_cast<float>(scale));
 }
 
 void destroy_main_background_buffer() {
@@ -2235,6 +2316,7 @@ void draw_light_particle(Gdiplus::Graphics& graphics,float x,float y,
 }
 
 void draw_dissolve_overlay(HDC dc) {
+    if (plugin_manager.active_index()!=0) { return; }
     if (dissolving_notes.empty()) { return; }
     Gdiplus::Graphics graphics(dc);
     graphics.ScaleTransform(static_cast<float>(current_scale),static_cast<float>(current_scale));
@@ -2293,6 +2375,7 @@ void draw_dissolve_overlay(HDC dc) {
 }
 
 void draw_playback_overlay(HDC dc) {
+    if (plugin_manager.active_index()!=0) { return; }
     if (playback_loop_ms<=0.0) { return; }
     double elapsed=static_cast<double>(monotonic_ms()-playback_start_ms);
     double beat=std::fmod(elapsed,playback_loop_ms)/playback_loop_ms*rhythm.length;
@@ -2342,6 +2425,7 @@ void draw_playback_overlay(HDC dc) {
 }
 
 void draw_emotion_overlay(HDC dc,const RECT& dirty) {
+    if (plugin_manager.active_index()!=0) { return; }
     Gdiplus::Graphics graphics(dc);
     graphics.SetClip(Gdiplus::Rect(dirty.left,dirty.top,dirty.right-dirty.left,dirty.bottom-dirty.top));
     graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -2777,6 +2861,64 @@ void draw_mode_wheel(Gdiplus::Graphics& graphics,bool ring=true,float scale_fact
     }
 }
 
+Gdiplus::RectF configuration_tab_bounds(int tab) {
+    return {32.0f+248*tab,739,240.0f,55.0f*2/3};
+}
+void plugin_action_button(Gdiplus::Graphics& graphics,const std::wstring& label,Gdiplus::RectF box,bool accent=false) {
+    Gdiplus::GraphicsPath path; add_rounded_rectangle(path,box,12);
+    Gdiplus::LinearGradientBrush fill(Gdiplus::PointF(box.X,box.Y),Gdiplus::PointF(box.X,box.GetBottom()),
+        accent?Gdiplus::Color(250,79,154,132):Gdiplus::Color(245,55,77,88),Gdiplus::Color(250,29,49,61));
+    Gdiplus::Pen edge(Gdiplus::Color(180,153,210,195),1.2f);
+    graphics.FillPath(&fill,&path); graphics.DrawPath(&edge,&path); draw_centered_text(graphics,label,box,17,true);
+}
+void draw_plugin_management(Gdiplus::Graphics& graphics) {
+    draw_centered_text(graphics,L"插件管理",{40,28,720,48},30,true);
+    const auto& items=plugin_manager.plugins();
+    for (int visible=0;visible<4;++visible) {
+        int index=plugin_scroll+visible; if (index>=static_cast<int>(items.size())) { break; }
+        const auto& info=items[index]; float y=94+visible*136.0f;
+        Gdiplus::RectF box(40,y,720,124); Gdiplus::GraphicsPath path; add_rounded_rectangle(path,box,18);
+        Gdiplus::SolidBrush fill(Gdiplus::Color(215,info.enabled?35:26,info.enabled?69:43,info.enabled?71:57));
+        Gdiplus::Pen edge(Gdiplus::Color(120,140,205,185),1.2f); graphics.FillPath(&fill,&path); graphics.DrawPath(&edge,&path);
+        draw_centered_text(graphics,info.name,{58,y+14,535,32},24,true);
+        draw_centered_text(graphics,info.description,{58,y+56,535,24},15,false,Gdiplus::Color(255,193,210,218));
+        draw_centered_text(graphics,info.status,{58,y+91,535,22},14,false,Gdiplus::Color(255,151,216,185));
+        plugin_action_button(graphics,info.builtin?L"内置":info.enabled?L"禁用":L"启用",{620,y+40,116,44},info.enabled);
+    }
+    plugin_action_button(graphics,L"打开插件文件夹",{40,647,225,43});
+    plugin_action_button(graphics,L"刷新列表",{287,647,225,43});
+    plugin_action_button(graphics,L"开发者指南",{535,647,225,43});
+}
+void handle_plugin_management(HWND window,const Gdiplus::PointF& point) {
+    if (point_in_logical_rect(point,40,647,225,43)) {
+        ShellExecuteW(window,L"open",plugin_manager.directory().c_str(),nullptr,nullptr,SW_SHOWNORMAL); return;
+    }
+    if (point_in_logical_rect(point,287,647,225,43)) { refresh_plugins(main_window); InvalidateRect(window,nullptr,FALSE); return; }
+    if (point_in_logical_rect(point,535,647,225,43)) {
+        auto file=executable_directory()+L"\\README.md";
+        if (reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",file.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32) {
+            MessageBoxW(window,L"请打开项目 README.md 中的开发者指南。",L"开发者指南",MB_OK|MB_ICONINFORMATION);
+        } return;
+    }
+    for (int visible=0;visible<4;++visible) {
+        std::size_t index=plugin_scroll+visible;
+        if (index>=plugin_manager.plugins().size() || !point_in_logical_rect(point,620,134+visible*136.0f,116,44)) { continue; }
+        const auto& item=plugin_manager.plugins()[index];
+        if (item.builtin) { return; }
+        else {
+            bool enabled=!item.enabled;
+            if (enabled) {
+                auto prompt=L"插件能够执行本机代码，请只启用你信任的扩展。\n\n是否启用「"+item.name+L"」？";
+                if (MessageBoxW(window,prompt.c_str(),L"确认启用插件",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES) { return; }
+            }
+            std::wstring error;
+            if (plugin_manager.set_enabled(index,enabled,error)) {
+                update_plugin_interface(main_window);
+            } else { MessageBoxW(window,error.c_str(),L"插件设置失败",MB_OK|MB_ICONWARNING); }
+        }
+        configuration_cached_tab=-1; InvalidateRect(window,nullptr,FALSE); return;
+    }
+}
 void draw_configuration_contents(HWND window,HDC dc,bool composite=true) {
     RECT client{};
     GetClientRect(window,&client);
@@ -2843,6 +2985,7 @@ void draw_configuration_contents(HWND window,HDC dc,bool composite=true) {
             graphics.DrawEllipse(&point_edge,point.X-8.0f,point.Y-8.0f,16.0f,16.0f);
         }
     }
+    else if (configuration_tab==CONFIG_TAB_PLUGINS) { draw_plugin_management(graphics); }
     else { draw_mode_wheel(graphics,composite,transform.scale); }
     float reveal=composite ? configuration_progress(configuration_switched,200) : 1;
     if (reveal<1) {
@@ -2851,13 +2994,16 @@ void draw_configuration_contents(HWND window,HDC dc,bool composite=true) {
             Gdiplus::Color(opacity,23,29,43),Gdiplus::Color(opacity,56,44,76));
         graphics.FillRectangle(&veil,0,0,800,714);
     }
-    const std::array<std::wstring,2> tab_titles={{
-        L"调式选择",L"和弦行进评价雷达图"
+    const std::array<std::wstring,3> tab_titles={{
+        L"调式选择",L"和弦行进评价雷达图",L"插件管理"
     }};
-    for (int tab=0;tab<2;++tab) {
-        Gdiplus::RectF bounds(35.0f+370.0f*tab,724.0f,360.0f,55.0f);
+    for (int tab=0;tab<3;++tab) {
+        auto bounds=configuration_tab_bounds(tab);
+        if (tab==CONFIG_TAB_PLUGINS && plugin_tab_art.draw(graphics,bounds,tab==configuration_tab)) { continue; }
+        if (tab!=CONFIG_TAB_PLUGINS) {
         if (button_artworks.draw(graphics,tab==CONFIG_TAB_MODE ? ncnl::ButtonArt::ModeTab : ncnl::ButtonArt::RadarTab,
             bounds,tab==configuration_tab)) { continue; }
+        }
         Gdiplus::GraphicsPath path;
         add_rounded_rectangle(path,bounds,13.0f);
         Gdiplus::SolidBrush fill(
@@ -3064,12 +3210,13 @@ LRESULT CALLBACK configuration_window_procedure(
         break;
     case WM_LBUTTONDOWN: {
         Gdiplus::PointF point=configuration_logical_point(window,l_param);
-        for (int tab=0;tab<2;++tab) {
-            if (point_in_logical_rect(point,35.0f+370*tab,724,360,55)) {
+        for (int tab=0;tab<3;++tab) {
+            if (configuration_tab_bounds(tab).Contains(point)) {
                 configuration_tab=tab; configuration_switched=monotonic_ms();
                 animate_configuration(window); return 0;
             }
         }
+        if (configuration_tab==CONFIG_TAB_PLUGINS) { handle_plugin_management(window,point); return 0; }
         if (configuration_tab==CONFIG_TAB_MODE) {
             if (point_in_logical_rect(point,230,670,340,40)) {
                 apply_selected_mode(); SendMessageW(window,WM_CLOSE,0,0); return 0;
@@ -3138,6 +3285,11 @@ LRESULT CALLBACK configuration_window_procedure(
         }
         return 0;
     case WM_MOUSEWHEEL:
+        if (configuration_tab==CONFIG_TAB_PLUGINS) {
+            plugin_scroll=std::max(0,std::min(std::max(0,static_cast<int>(plugin_manager.plugins().size())-4),
+                plugin_scroll-GET_WHEEL_DELTA_WPARAM(w_param)/WHEEL_DELTA));
+            configuration_cached_tab=-1; InvalidateRect(window,nullptr,FALSE); return 0;
+        }
         if (configuration_tab==CONFIG_TAB_MODE) {
             int index=wheel_started && !wheel_dragging ? static_cast<int>(std::round(-wheel_target/30)) : wheel_top_index();
             rotate_wheel_to(window,index+GET_WHEEL_DELTA_WPARAM(w_param)/WHEEL_DELTA);
@@ -3190,7 +3342,7 @@ void open_configuration_window(HWND owner) {
         MessageBoxW(owner,L"无法创建配置窗口。",L"配置",MB_OK|MB_ICONERROR);
         return;
     }
-    configuration_mouse_feedback.initialize(configuration_window,executable_directory()+L"\\assets\\cursor");
+    configuration_mouse_feedback.initialize(configuration_window,L":/assets/cursor");
     SetLayeredWindowAttributes(configuration_window,0,0,LWA_ALPHA);
     animate_configuration(configuration_window);
     ShowWindow(configuration_window,SW_SHOW);
@@ -3213,8 +3365,12 @@ LRESULT CALLBACK window_procedure(
         break;
 
     case WM_CREATE: {
-        mouse_feedback.initialize(window,executable_directory()+L"\\assets\\cursor");
+        mouse_feedback.initialize(window,L":/assets/cursor");
         main_window=window;
+        SetWindowLongPtrW(window,GWL_STYLE,GetWindowLongPtrW(window,GWL_STYLE)|WS_CLIPCHILDREN);
+        plugin_container=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,
+            0,0,1,1,window,nullptr,GetModuleHandleW(nullptr),nullptr);
+        refresh_plugins(window);
         initialize_rhythm();
         DragAcceptFiles(window,TRUE);
         chord_editor=CreateWindowExW(
@@ -3272,6 +3428,7 @@ LRESULT CALLBACK window_procedure(
     }
 
     case WM_LBUTTONDBLCLK: {
+        if (plugin_manager.active_index()!=0) { return 0; }
         cancel_header_drag(window,true);
         POINT point={GET_X_LPARAM(l_param),GET_Y_LPARAM(l_param)};
         int position=piano_header_at_client_point(window,point);
@@ -3283,6 +3440,8 @@ LRESULT CALLBACK window_procedure(
     }
 
     case WM_LBUTTONDOWN: {
+        POINT plugin_point={GET_X_LPARAM(l_param),GET_Y_LPARAM(l_param)};
+        if (switch_plugin_at(window,plugin_point) || plugin_manager.active_index()!=0) { return 0; }
         if (editing_chord>=0) {
             commit_chord_editor(false);
         }
@@ -3371,6 +3530,7 @@ LRESULT CALLBACK window_procedure(
         return 0;
 
     case WM_CLEAR_CHORD_HOVER: {
+        if (plugin_manager.active_index()!=0) { return 0; }
         cancel_header_drag(window,true);
         key_preview_gesture=false;
         stop_key_preview();
@@ -3401,6 +3561,7 @@ LRESULT CALLBACK window_procedure(
         break;
 
     case WM_MBUTTONDOWN:
+        if (plugin_manager.active_index()!=0) { return 0; }
         cancel_header_drag(window,true);
         middle_dragging=true;
         middle_visited.clear();
@@ -3554,6 +3715,12 @@ LRESULT CALLBACK window_procedure(
 
     case WM_CTLCOLORSTATIC: {
         HDC dc=reinterpret_cast<HDC>(w_param);
+        HWND control=reinterpret_cast<HWND>(l_param);
+        if (control==mode_label && ensure_main_background_buffer(window,dc)) {
+            POINT origin={0,0}; MapWindowPoints(control,window,&origin,1);
+            RECT bounds={}; GetClientRect(control,&bounds);
+            BitBlt(dc,0,0,bounds.right,bounds.bottom,main_background_dc,origin.x,origin.y,SRCCOPY);
+        }
         SetBkMode(dc,TRANSPARENT);
         SetTextColor(dc,RGB(250,250,255));
         return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
@@ -3597,11 +3764,11 @@ LRESULT CALLBACK window_procedure(
         }
         if (id==ID_PRESET_ACTION && notification==BN_CLICKED) {
             ncnl::open_preset_library(window,executable_directory()+L"\\presents",
-                executable_directory()+L"\\assets\\cursor",interface_font_family.get(),interface_font_name,
+                L":/assets/cursor",interface_font_family.get(),interface_font_name,
                 [](const std::wstring& path){ return import_midi_file(ncnl::preset_library_window(),path); },
                 [](){ return ncnl::encode_midi(rhythm,BPM); },
-                executable_directory()+L"\\assets\\skins\\preset.png",
-                executable_directory()+L"\\assets\\skins\\buttons");
+                L":/assets/skins/preset.png",
+                L":/assets/skins/buttons");
             return 0;
         }
         if (id>=ID_PRESET_BASE && id<ID_PRESET_BASE+5 && notification==BN_CLICKED) {
@@ -3634,6 +3801,7 @@ LRESULT CALLBACK window_procedure(
 
     case WM_DESTROY:
         stop_animation_clock();
+        plugin_manager.shutdown(); plugin_container=nullptr; plugin_button_art.clear();
         cancel_header_drag(window);
         if (configuration_window) { DestroyWindow(configuration_window); }
         ncnl::close_preset_library();
@@ -3659,6 +3827,8 @@ LRESULT CALLBACK window_procedure(
 }
 
 int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
+    try { initialize_runtime_storage(executable_directory()); }
+    catch (const std::exception& error) { MessageBoxW(nullptr,utf8_to_wide(error.what()).c_str(),L"启动失败",MB_OK|MB_ICONERROR); return 1; }
     using SetProcessDpiAwareFunction=BOOL (WINAPI*)();
     auto set_process_dpi_aware=reinterpret_cast<SetProcessDpiAwareFunction>(
         GetProcAddress(GetModuleHandleW(L"user32.dll"),"SetProcessDPIAware")
@@ -3673,14 +3843,9 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
         return 1;
     }
 
-    load_interface_font(executable_directory()+L"\\assets\\res\\font.ttf");
+    load_interface_font(L":/assets/res/font.ttf");
 
-    progression_config_path=wide_to_utf8(executable_directory()+L"\\config.json");
-    if (!ncnl::load_progression_config(progression_config_path)) {
-        ncnl::set_progression_weights(ncnl::default_progression_weights());
-        ncnl::save_progression_config(progression_config_path);
-    }
-    load_application_skins(executable_directory()+L"\\assets");
+    load_application_skins(L":/assets");
     load_interface_images();
 
     const wchar_t CLASS_NAME[]=L"NoChordNoLifeGeneratorWindow";
@@ -3690,9 +3855,11 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
     window_class.hInstance=instance;
     window_class.lpszClassName=CLASS_NAME;
     window_class.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    window_class.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(1));
     window_class.hbrBackground=nullptr;
 
     if (!RegisterClassW(&window_class)) {
+        ncnl_button_art.reset(); plugin_tab_art.reset();
         unload_interface_font();
         Gdiplus::GdiplusShutdown(gdiplus_token);
         return 1;
@@ -3704,8 +3871,10 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
     configuration_class.hInstance=instance;
     configuration_class.lpszClassName=L"NoChordNoLifeConfigurationWindow";
     configuration_class.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    configuration_class.hIcon=window_class.hIcon;
     configuration_class.hbrBackground=nullptr;
     if (!RegisterClassW(&configuration_class)) {
+        ncnl_button_art.reset(); plugin_tab_art.reset();
         unload_interface_font();
         Gdiplus::GdiplusShutdown(gdiplus_token);
         return 1;
@@ -3717,7 +3886,7 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
     AdjustWindowRectEx(&initial_size,style,FALSE,ex_style);
 
     HWND window=CreateWindowExW(
-        ex_style,CLASS_NAME,L"NoChordNoLife 和弦进行生成器",
+        ex_style,CLASS_NAME,L"NoChordNoLife！",
         style,
         CW_USEDEFAULT,CW_USEDEFAULT,
         initial_size.right-initial_size.left,
@@ -3725,6 +3894,7 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
         nullptr,nullptr,instance,nullptr
     );
     if (!window) {
+        ncnl_button_art.reset(); plugin_tab_art.reset(); plugin_button_art.clear();
         background_image.reset();
         pentagon_image.reset(); button_artworks.reset();
         for (auto& skin:configuration_skins) { skin.reset(); }
@@ -3733,6 +3903,8 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
         return 1;
     }
 
+    SendMessageW(window,WM_SETICON,ICON_SMALL,reinterpret_cast<LPARAM>(LoadImageW(instance,MAKEINTRESOURCEW(1),IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED)));
     ShowWindow(window,show_command);
     UpdateWindow(window);
 
@@ -3740,7 +3912,7 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
     while (GetMessageW(&message,nullptr,0,0)>0) {
         bool first_key_press=(message.lParam&(1LL<<30))==0;
         bool editing=message.hwnd==chord_editor || GetFocus()==chord_editor;
-        bool main_window_key=GetAncestor(message.hwnd,GA_ROOT)==main_window;
+        bool main_window_key=GetAncestor(message.hwnd,GA_ROOT)==main_window && plugin_manager.active_index()==0;
         if (main_window_key || (configuration_window && GetAncestor(message.hwnd,GA_ROOT)==configuration_window) ||
             (ncnl::preset_library_window() && GetAncestor(message.hwnd,GA_ROOT)==ncnl::preset_library_window())) {
             track_mouse_feedback_message(message);
@@ -3802,6 +3974,7 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
 
     background_image.reset();
     pentagon_image.reset(); button_artworks.reset();
+    ncnl_button_art.reset(); plugin_tab_art.reset(); plugin_button_art.clear();
     for (auto& skin:configuration_skins) { skin.reset(); }
     arrow_image.reset();
     for (auto& image:emotion_images) {
@@ -3816,9 +3989,6 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
     }
     if (card_font) {
         DeleteObject(card_font);
-    }
-    if (hint_font) {
-        DeleteObject(hint_font);
     }
     unload_interface_font();
     Gdiplus::GdiplusShutdown(gdiplus_token);

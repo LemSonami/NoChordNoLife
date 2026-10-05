@@ -2,6 +2,7 @@
 #define _UNICODE
 #include "../ui/button_artwork.hpp"
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -333,17 +334,21 @@ void fit(const std::wstring& input,const std::wstring& output,ncnl::ButtonArt id
 }
 }
 int main(int argc,char* argv[]) {
-    if (argc!=3) { std::cerr<<"用法：button_asset_fit 源目录 输出目录\n"; return 1; }
+    if (argc!=3 && argc!=4) { std::cerr<<"用法：button_asset_fit 源目录 输出目录 [按钮名]\n"; return 1; }
     std::string from=argv[1],to=argv[2]; std::wstring input(from.begin(),from.end()),output(to.begin(),to.end());
     ULONG_PTR token=0; Gdiplus::GdiplusStartupInput startup;
     if (Gdiplus::GdiplusStartup(&token,&startup,nullptr)!=Gdiplus::Ok) { return 1; }
     int result=0;
     try {
         if (input==output) { throw std::runtime_error("使用单独的输出目录；保留源艺术作品"); }
+        bool selected=false;
         for (int i=0;i<static_cast<int>(ncnl::ButtonArt::Count);++i) {
             auto id=static_cast<ncnl::ButtonArt>(i); auto filename=std::wstring(ncnl::button_art_filename(id))+L".png";
+            if (argc==4 && filename!=std::wstring(argv[3],argv[3]+std::strlen(argv[3]))+L".png") { continue; }
+            selected=true;
             fit(input+L"/"+filename,output+L"/"+filename,id);
         }
+        if (!selected) { throw std::runtime_error("没有找到对应的按钮名称。"); }
     } catch (const std::exception& error) { std::cerr<<"FAIL: "<<error.what()<<"\n"; result=2; }
     Gdiplus::GdiplusShutdown(token); return result;
 }

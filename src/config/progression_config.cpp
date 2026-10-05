@@ -5,6 +5,9 @@
 #include <iomanip>
 #include <iterator>
 #include <sstream>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace ncnl{
 namespace {
@@ -96,6 +99,17 @@ void adjust_progression_weight(std::size_t index,double value) {
 }
 
 bool load_progression_config(const std::string& path) {
+#ifdef _WIN32
+    int length=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path.c_str(),-1,nullptr,0);
+    if (!length) { return false; }
+    std::wstring wide(length,L'\0'); MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path.c_str(),-1,&wide[0],length);
+    HANDLE file=CreateFileW(wide.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
+    if (file==INVALID_HANDLE_VALUE) { return false; }
+    DWORD size=GetFileSize(file,nullptr),count=0;
+    if (size==INVALID_FILE_SIZE || size>1048576) { CloseHandle(file); return false; }
+    std::string json(size,'\0'); BOOL read=ReadFile(file,size?&json[0]:nullptr,size,&count,nullptr); CloseHandle(file);
+    if (!read || count!=size) { return false; }
+#else
     std::ifstream input(path.c_str(),std::ios::binary);
     if (!input) {
         return false;
@@ -104,6 +118,7 @@ bool load_progression_config(const std::string& path) {
         (std::istreambuf_iterator<char>(input)),
         std::istreambuf_iterator<char>()
     );
+#endif
     ProgressionWeights loaded{};
     for (std::size_t index=0;index<WEIGHT_KEYS.size();++index) {
         if (!read_number(json,WEIGHT_KEYS[index],loaded.values[index])) {
@@ -115,10 +130,14 @@ bool load_progression_config(const std::string& path) {
 }
 
 bool save_progression_config(const std::string& path) {
+#ifdef _WIN32
+    std::ostringstream output;
+#else
     std::ofstream output(path.c_str(),std::ios::binary|std::ios::trunc);
     if (!output) {
         return false;
     }
+#endif
     output<<"{\n  \"chord_progression_weights\": {\n";
     output<<std::fixed<<std::setprecision(6);
     for (std::size_t index=0;index<WEIGHT_KEYS.size();++index) {
@@ -127,7 +146,17 @@ bool save_progression_config(const std::string& path) {
               <<(index+1==WEIGHT_KEYS.size() ? "\n" : ",\n");
     }
     output<<"  }\n}\n";
+#ifdef _WIN32
+    int length=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path.c_str(),-1,nullptr,0);
+    if (!length) { return false; }
+    std::wstring wide(length,L'\0'); MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path.c_str(),-1,&wide[0],length);
+    HANDLE file=CreateFileW(wide.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,0,nullptr);
+    if (file==INVALID_HANDLE_VALUE) { return false; }
+    auto bytes=output.str(); DWORD count=0; BOOL written=WriteFile(file,bytes.data(),bytes.size(),&count,nullptr); CloseHandle(file);
+    return written && count==bytes.size();
+#else
     return output.good();
+#endif
 }
 
 }

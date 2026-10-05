@@ -621,12 +621,15 @@ void open_preset_library(HWND owner,const std::wstring& directory,const std::wst
             library->buttons.load(ButtonArt::Save,button_directory);
         }
         WNDCLASSW type{}; type.style=CS_DBLCLKS; type.lpfnWndProc=procedure; type.hInstance=GetModuleHandleW(nullptr);
+        type.hIcon=LoadIconW(type.hInstance,MAKEINTRESOURCEW(1));
         type.lpszClassName=L"NoChordNoLifePresetLibrary"; RegisterClassW(&type);
         DWORD style=WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX; RECT size={0,0,1000,1000}; AdjustWindowRect(&size,style,FALSE);
         POINT position=centered_window_position(owner,size.right-size.left,size.bottom-size.top);
         HWND window=CreateWindowExW(WS_EX_LAYERED,type.lpszClassName,L"NoChordNoLife · 节奏型预设",style,position.x,position.y,
             size.right-size.left,size.bottom-size.top,owner,nullptr,type.hInstance,nullptr);
-        if (!window) { throw std::runtime_error("无法打开预设管理界面。"); }
+          if (!window) { throw std::runtime_error("无法打开预设管理界面。"); }
+          SendMessageW(window,WM_SETICON,ICON_SMALL,reinterpret_cast<LPARAM>(LoadImageW(type.hInstance,MAKEINTRESOURCEW(1),IMAGE_ICON,
+              GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED)));
         library_feedback.initialize(window,cursors);
         library->window_started=transition_ms(); library->reveal_started=library->window_started;
         SetLayeredWindowAttributes(window,0,0,LWA_ALPHA); SetTimer(window,TRANSITION_TIMER,16,nullptr);
