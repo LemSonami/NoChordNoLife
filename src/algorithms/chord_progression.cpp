@@ -15,9 +15,9 @@
 namespace ncnl{
 namespace {
 
-// 七种中古调式的十二平均律映射
-// 默认认为，主音=0，主音的高一八度的下一个半音为11
-// 其实采用1~12（而非0~11）更方便人类理解？但是要方便计算机理解的话，还是从0开始吧（
+
+
+
 const std::map<std::string, std::vector<int>> MODE_INTERVALS={
     {"Ionian",    {0,2,4,5,7,9,11}},
     {"Dorian",    {0,2,3,5,7,9,10}},
@@ -28,7 +28,7 @@ const std::map<std::string, std::vector<int>> MODE_INTERVALS={
     {"Locrian",   {0,1,3,5,6,8,10}},
 };
 
-// 定义C大调的所有内音（即所有白键）的十二平局律映射
+
 const std::map<char, int> NATURAL_PC={
     {'C',0},
     {'D',2},
@@ -39,8 +39,8 @@ const std::map<char, int> NATURAL_PC={
     {'B',11},
 };
 
-// 所有和弦模板的十二平均律映射（根音记为0）
-// 涵盖：大小三和弦/增减三和弦/挂二四和弦/大小七和弦/属七和弦/半减七和弦/减七和弦
+
+
 const std::vector<std::set<int>> CHORD_TEMPLATES={
     {0,4,7},
     {0,3,7},
@@ -59,10 +59,10 @@ bool contains(const std::vector<int>& values, int value) {
     return std::find(values.begin(),values.end(),value)!=values.end();
 }
 
-}  // namespace
+}
 
 
-// 将str型升降记号映射到int型pitch-class的±1，取模12
+
 int parse_note(const std::string& note) {
     static const std::regex note_pattern(R"([A-G](?:#|b)?)");
     if (!std::regex_match(note,note_pattern)) {
@@ -84,7 +84,7 @@ int parse_note(const std::string& note) {
 }
 
 
-// 将调式输入拆分为主音和调式名称
+
 ModeData parse_mode(const std::string& mode_string) {
     std::istringstream input(mode_string);
     std::string tonic_name;
@@ -108,7 +108,7 @@ ModeData parse_mode(const std::string& mode_string) {
 }
 
 
-// 和弦内音拆分为pitch-class列表（音级关系去重+检测）
+
 Chord parse_chord(const std::string& chord_string) {
     std::istringstream input(chord_string);
     std::vector<std::string> notes;
@@ -122,8 +122,8 @@ Chord parse_chord(const std::string& chord_string) {
     Chord pcs;
     for (const auto& current_note:notes) {
         int pc=parse_note(current_note);
-        // 忽略八度重复带来的影响
-        // 例如：C E G C 等效为 C E G
+
+
         if (!contains(pcs,pc)) {
             pcs.push_back(pc);
         }
@@ -135,30 +135,30 @@ Chord parse_chord(const std::string& chord_string) {
 }
 
 
-// 音级距离（作差取绝对值）
+
 int pitch_class_distance(int a,int b) {
-    /*
-    十二平均律圈（而非五度圈）的最短距离
-    例如：
-        C→C#=1
-        C→B =1
-        C→G =5
-    */
+
+
+
+
+
+
+
     int d=std::abs(a-b)%12;
     return std::min(d,12-d);
 }
 
 
-// 动态规划计算两和弦间最小音级移动量之和
+
 VoiceLeadingResult minimum_voice_leading(const Chord& chord1,const Chord& chord2) {
-    /*
-    在所有可能的声部对应关系中寻找总移动量最小的方案
-    为减少复杂度，使用动态规划而不是暴力枚举/全排列
-    */
+
+
+
+
     Chord source=chord1;
     Chord target=chord2;
     bool swapped=false;
-    // 为减少DP状态，让source永远是较小的集合
+
     if (source.size()>target.size()) {
         std::swap(source,target);
         swapped=true;
@@ -201,17 +201,17 @@ VoiceLeadingResult minimum_voice_leading(const Chord& chord1,const Chord& chord2
 }
 
 
-// 推测和弦根音
+
 int infer_chord_root(const Chord& chord) {
-    /*
-    尝试上面定义的和弦模板（CHORD_TEMPLATES）推测根音
-    例如：
-        C E G   → C
-        E G C   → C
-        G B D   → G
-        B D F G → G（G7）
-    无法可靠识别时，回退到输入的第一个音
-    */
+
+
+
+
+
+
+
+
+
     std::set<int> chord_set(chord.begin(),chord.end());
     bool has_best=false;
     int best_error=0;
@@ -231,7 +231,7 @@ int infer_chord_root(const Chord& chord) {
                 extra+=chord_template.count(pc)==0;
             }
 
-            // 缺少模板核心音的对误差的惩罚更重
+
             int error=missing*2+extra;
             if (!has_best || std::tie(error,root)<std::tie(best_error,best_root)) {
                 has_best=true;
@@ -240,7 +240,7 @@ int infer_chord_root(const Chord& chord) {
             }
         }
     }
-    // 无法可靠识别的判据为，误差（error）太大
+
     if (!has_best || best_error>2) {
         return chord.front();
     }
@@ -248,35 +248,35 @@ int infer_chord_root(const Chord& chord) {
 }
 
 
-// 调式一致性检测（调式内音级稳定度）
+
 double tonal_stability(int pc,int tonic,const std::vector<int>& mode_intervals) {
-    /*
-    简化版的 Lerdahl-style tonal hierarchy
-    借用 tonal hierarchy / tonal attraction 的思想
-    例如：1级最稳定，5级其次，3级再次…
-    其他调式内音级较弱，调外音最低
-    */
+
+
+
+
+
+
     int relative_pc=(pc-tonic+12)%12;
     auto found=std::find(mode_intervals.begin(),mode_intervals.end(),relative_pc);
     if (found==mode_intervals.end()) {
         return 0.10;
     }
     std::size_t degree=static_cast<std::size_t>(found-mode_intervals.begin());
-    // 为1级最稳定，7级最不稳定
+
     const std::vector<double> stability_by_degree={
-        1.00,//I
-        0.55,//II
-        0.75,//III
-        0.62,//IV
-        0.88,//V
-        0.50,//VI
-        0.42,//VII
+        1.00,
+        0.55,
+        0.75,
+        0.62,
+        0.88,
+        0.50,
+        0.42,
     };
     return stability_by_degree[degree];
 }
 
 
-// 根音运动维度评分
+
 double root_motion_score(int root1,int root2) {
     int d=pitch_class_distance(root1,root2);
     const std::map<int,double> scores={
@@ -292,19 +292,19 @@ double root_motion_score(int root1,int root2) {
 }
 
 
-// 使用Tonal Attraction/Resolution模型评估调性吸引/解决维度的评分
+
 double attraction_score(
     const std::vector<VoicePair>& voice_pairs,
     int tonic,
     const std::vector<int>& mode_intervals
 ) {
-    /*
-    衡量声部是否：
-    1. 保留共同音
-    2. 半音/全音移动
-    3. 向更稳定的调式音级移动
-    ·受Lerdahl tonal attraction模型理论启发
-    */
+
+
+
+
+
+
+
     std::vector<double> scores;
     for (const auto& voice_pair:voice_pairs) {
         int source=voice_pair.first;
@@ -329,27 +329,27 @@ double attraction_score(
         );
 
         double score;
-        // 共同音
+
         if (distance==0) {
             score=0.65;
         }
 
-        // 半音上下行
+
         else if (distance==1) {
             score=0.75+0.25*stability_gain;
         }
 
-        // 全音进行
+
         else if (distance==2) {
             score=0.55+0.25*stability_gain;
         }
 
-        // 三度附近
+
         else if (distance<=4) {
             score=0.30+0.20*stability_gain;
         }
 
-        // 四度以上
+
         else {
             score=0.12;
         }
@@ -364,7 +364,7 @@ double attraction_score(
 }
 
 
-// 赋权后总评分
+
 double chord_progression_score(
     const std::string& mode_string,
     const std::string& chord1_string,
@@ -374,21 +374,21 @@ double chord_progression_score(
     Chord chord1=parse_chord(chord1_string);
     Chord chord2=parse_chord(chord2_string);
 
-    // I.声部进行效率
+
     auto voice_leading=minimum_voice_leading(chord1,chord2);
-    // 和弦音数不一致时增加轻度惩罚
-    // 例如三和弦→七和弦不应该被视为完全无代价
+
+
     auto cardinality_difference=std::abs(
         static_cast<int>(chord1.size())-static_cast<int>(chord2.size())
     );
     double unmatched_penalty=2.5*cardinality_difference;
     double average_voice_distance=(voice_leading.cost+unmatched_penalty)/
         static_cast<double>(std::max(chord1.size(),chord2.size()));
-    // 指数衰减（分母取2.8不是数学推演结果啦，单纯是随便取的，因为权重参数可以任意调整）
-    // 当然了，根据单调性，平均移动越小，得分越高
+
+
     double voice_leading_score=std::exp(-average_voice_distance/2.8);
 
-    // II.共同音保留
+
     std::set<int> chord1_set(chord1.begin(),chord1.end());
     std::set<int> chord2_set(chord2.begin(),chord2.end());
     int common_tones=0;
@@ -398,7 +398,7 @@ double chord_progression_score(
     double common_tone_score=common_tones/
         static_cast<double>(std::min(chord1.size(),chord2.size()));
 
-    // III.调式一致性
+
     std::set<int> mode_pitch_classes;
     for (int interval:mode.intervals) {
         mode_pitch_classes.insert((mode.tonic+interval)%12);
@@ -415,19 +415,19 @@ double chord_progression_score(
     double chord2_mode_ratio=chord2_mode_count/static_cast<double>(chord2.size());
     double modal_score=(chord1_mode_ratio+chord2_mode_ratio)/2.0;
 
-    // IV.根音运动
+
     int root1=infer_chord_root(chord1);
     int root2=infer_chord_root(chord2);
     double harmonic_root_score=root_motion_score(root1,root2);
 
-    // V.Tonal attraction/resolution
+
     double resolution_score=attraction_score(
         voice_leading.pairs,
         mode.tonic,
         mode.intervals
     );
 
-    // 最终加权（配置中的五项权重始终归一化为 1）
+
     const auto& weights=progression_weights().values;
     double final_score=100.0*(
         weights[static_cast<std::size_t>(ProgressionWeight::voice_leading)]*

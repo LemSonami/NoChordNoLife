@@ -1,3 +1,4 @@
+#include "../host/runtime.hpp"
 #pragma once
 #include <windows.h>
 #include <objidl.h>
@@ -5,7 +6,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
-#include "asset_index.hpp"
+#include <asset_index.hpp>
 
 namespace ncnl {
 struct AssetBytes { const BYTE* data; DWORD size; };
@@ -15,7 +16,7 @@ inline AssetBytes embedded_asset(const std::wstring& path) {
     if (normalized.compare(0,prefix.size(),prefix)!=0) { return {nullptr,0}; }
     auto name=normalized.substr(prefix.size());
     for (const auto& entry:ASSET_INDEX) { if (name==entry.path) {
-        HMODULE module=GetModuleHandleW(nullptr);
+        HMODULE module=ncnl::runtime_module();
         HRSRC resource=FindResourceW(module,MAKEINTRESOURCEW(entry.id),MAKEINTRESOURCEW(10));
         if (!resource) { return {nullptr,0}; }
         return {static_cast<const BYTE*>(LockResource(LoadResource(module,resource))),SizeofResource(module,resource)};

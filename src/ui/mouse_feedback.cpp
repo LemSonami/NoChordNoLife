@@ -1,3 +1,4 @@
+#include "../host/runtime.hpp"
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -134,7 +135,7 @@ void MouseFeedback::render(ULONGLONG now) {
     int width=bounds.right-bounds.left,height=bounds.bottom-bounds.top;
     if (width<=0 || height<=0 || !ensure_buffer(width,height)) { return; }
     if (!overlay) {
-        WNDCLASSW type{}; type.lpfnWndProc=overlay_procedure; type.hInstance=GetModuleHandleW(nullptr);
+        WNDCLASSW type{}; type.lpfnWndProc=overlay_procedure; type.hInstance=ncnl::runtime_module();
         type.lpszClassName=L"NoChordNoLifeMouseEffects"; RegisterClassW(&type);
         overlay=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,
             type.lpszClassName,L"",WS_POPUP,0,0,1,1,owner,nullptr,type.hInstance,nullptr);

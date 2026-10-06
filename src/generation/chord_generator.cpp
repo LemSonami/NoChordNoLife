@@ -22,17 +22,17 @@ const std::array<const char*,12> NOTE_NAMES={{
 }};
 
 const std::vector<std::vector<int>> CHORD_SHAPES={
-    {0,4,7},       //Major
-    {0,3,7},       //minor
-    {0,3,6},       //dim
-    {0,4,8},       //aug
-    {0,2,7},       //sus2
-    {0,5,7},       //sus4
-    {0,4,7,10},    //7
-    {0,4,7,11},    //M7
-    {0,3,7,10},    //m7
-    {0,3,6,10},    //half dim7
-    {0,3,6,9},     //dim7
+    {0,4,7},
+    {0,3,7},
+    {0,3,6},
+    {0,4,8},
+    {0,2,7},
+    {0,5,7},
+    {0,4,7,10},
+    {0,4,7,11},
+    {0,3,7,10},
+    {0,3,6,10},
+    {0,3,6,9},
 };
 
 struct Candidate {
@@ -89,7 +89,7 @@ std::vector<Candidate> build_candidates(const std::string& mode_string) {
     std::vector<std::pair<std::string,unsigned int>> chord_texts;
     std::set<unsigned int> seen;
 
-    // 二音结构保证五个情感区间都有候选；三和弦和七和弦负责提供常用和声结构。
+
     for (int root=0;root<12;++root) {
         for (int interval=1;interval<=6;++interval) {
             Chord chord={root,(root+interval)%12};
@@ -118,7 +118,7 @@ std::vector<Candidate> build_candidates(const std::string& mode_string) {
         Chord parsed=parse_chord(item.first);
         int outside=0;
         for (int pc:parsed) { outside+=(scale_mask&(1u<<pc))==0; }
-        // Soft preferences: each borrowed tone lowers odds; dyads remain a fallback.
+
         double preference=std::pow(0.15,outside)*(parsed.size()==2 ? 0.18 : 1.0);
         candidates.push_back({
             item.first,
@@ -137,10 +137,10 @@ Candidate fixed_candidate(
     std::string notes=normalize_chord_text(constraint.fixed_notes);
     Chord parsed=parse_roll_notes(notes);
     double score=roll_emotion_score(mode_string,notes);
-    return {notes,score,chord_mask(parsed),1.0}; // Explicit user notes are never penalized or replaced.
+    return {notes,score,chord_mask(parsed),1.0};
 }
 
-}  // namespace
+}
 
 bool score_matches_preset(double score,int preset) {
     if (preset==-1) {
@@ -182,7 +182,7 @@ GeneratedProgression generate_progression(
         throw std::invalid_argument("请先导入节奏或创建和弦分块捏~");
     }
     const std::size_t count=constraints.size();
-    // 先让原算法验证调式格式，再构建候选库。
+
     parse_mode(mode_string);
     std::vector<Candidate> all_candidates=build_candidates(mode_string);
     std::vector<std::vector<Candidate>> pools(count);

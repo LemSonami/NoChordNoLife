@@ -1,5 +1,9 @@
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
 #include "plugin_manager.hpp"
 #include <algorithm>
 #include <cstring>

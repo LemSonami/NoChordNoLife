@@ -1,4 +1,4 @@
-idea/
-.git/
-.vscode/
-.learnings/
+vendor/
+build/
+dist/
+*.user

@@ -55,7 +55,7 @@ bool read_number(const std::string& json,const std::string& key,double& result) 
     return !input.fail() && std::isfinite(result) && result>=0.0;
 }
 
-}  // namespace
+}
 
 ProgressionWeights default_progression_weights() {
     return {{{0.45,0.15,0.15,0.10,0.15}}};

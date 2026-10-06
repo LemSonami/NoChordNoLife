@@ -1,6 +1,13 @@
+#include "../host/runtime.hpp"
+#include "../host/bridge_runtime.hpp"
+#include "../host/state.hpp"
+#include "../host/default_presets.hpp"
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
-#define _WIN32_WINNT 0x0600
+#endif
 
 #include <windows.h>
 #include <windowsx.h>
@@ -209,6 +216,12 @@ struct EditSnapshot {
 std::vector<EditSnapshot> undo_history;
 bool midi_drag_recorded=false;
 
+std::size_t midi_note_count() {
+    std::size_t count=0;
+    for(const auto& event:rhythm.events) count+=event.pitches.size();
+    return count;
+}
+
 void remember_edit() {
     if (undo_history.size()>=UNDO_HISTORY_LIMIT) { undo_history.erase(undo_history.begin()); }
     undo_history.push_back({rhythm,rhythm_splits,chord_blocks,displayed_progression,
@@ -217,8 +230,6 @@ void remember_edit() {
 int editing_chord=-1;
 int dragged_midi_position=-1;
 int dragged_midi_pitch=-1;
-HANDLE midi_playback_thread=nullptr;
-HANDLE midi_stop_event=nullptr;
 HMIDIOUT shared_midi_output=nullptr;
 int key_preview_pitch=-1;
 bool key_preview_gesture=false;
@@ -238,14 +249,7 @@ ULONGLONG monotonic_ms() {
     return static_cast<ULONGLONG>(counter.QuadPart/static_cast<double>(frequency)*1000.0);
 }
 
-bool wait_midi_deadline(HANDLE stop,double deadline) {
-    for (;;) {
-        double remaining=deadline-monotonic_ms();
-        DWORD delay=static_cast<DWORD>(std::ceil(std::max(0.0,std::min(60000.0,remaining))));
-        if (WaitForSingleObject(stop,delay)==WAIT_OBJECT_0) { return true; }
-        if (remaining<=60000.0) { return false; }
-    }
-}
+
 
 void initialize_rhythm() {
     rhythm.events.clear();
@@ -462,23 +466,7 @@ void add_rounded_rectangle(
     path.CloseFigure();
 }
 
-std::wstring executable_directory() {
-    std::vector<wchar_t> buffer(MAX_PATH,L'\0');
-    for (;;) {
-        DWORD length=GetModuleFileNameW(
-            nullptr,buffer.data(),static_cast<DWORD>(buffer.size())
-        );
-        if (length==0) {
-            return L".";
-        }
-        if (length<buffer.size()-1) {
-            std::wstring path(buffer.data(),length);
-            std::size_t separator=path.find_last_of(L"\\/");
-            return separator==std::wstring::npos ? L"." : path.substr(0,separator);
-        }
-        buffer.resize(buffer.size()*2,L'\0');
-    }
-}
+std::wstring executable_directory() { return ncnl::runtime_directory(); }
 
 
 
@@ -487,7 +475,9 @@ void initialize_runtime_storage(const std::wstring& directory) {
         auto path=directory+L"\\"+name;
         DWORD attributes=GetFileAttributesW(path.c_str());
         if (attributes==INVALID_FILE_ATTRIBUTES) {
-            if (!CreateDirectoryW(path.c_str(),nullptr)) { throw std::runtime_error("无法创建运行数据目录，请检查程序所在目录的写入权限。"); }
+            if (!CreateDirectoryW(path.c_str(),nullptr) && GetLastError()!=ERROR_ALREADY_EXISTS) {
+                throw std::runtime_error("无法创建 presents 或 plugins，请检查插件用户数据目录的写入权限。");
+            }
         } else if (!(attributes&FILE_ATTRIBUTE_DIRECTORY)) {
             throw std::runtime_error("presents 或 plugins 已被同名文件占用，请先移走该文件。");
         }
@@ -497,11 +487,12 @@ void initialize_runtime_storage(const std::wstring& directory) {
     if (attributes==INVALID_FILE_ATTRIBUTES) {
         if (GetLastError()!=ERROR_FILE_NOT_FOUND) { throw std::runtime_error("无法访问 config.json，请检查目录权限。"); }
         ncnl::set_progression_weights(ncnl::default_progression_weights());
-        if (!ncnl::save_progression_config(progression_config_path)) { throw std::runtime_error("无法创建默认 config.json。"); }
+        if (!ncnl::save_progression_config(progression_config_path)) { throw std::runtime_error("无法创建 config.json，请检查插件用户数据目录的写入权限。"); }
     } else if (!ncnl::load_progression_config(progression_config_path)) {
         ncnl::set_progression_weights(ncnl::default_progression_weights());
         MessageBoxW(nullptr,L"config.json 无法读取或内容无效，本次使用默认参数，原文件未改动。",L"配置提示",MB_OK|MB_ICONWARNING);
     }
+    ncnlplug::initialize_default_presets(directory);
 }
 
 void load_application_skins(const std::wstring& assets) {
@@ -768,7 +759,7 @@ HWND create_control(
         0,class_name,text,style,
         x,y,width,height,parent,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-        GetModuleHandleW(nullptr),nullptr
+        ncnl::runtime_module(),nullptr
     );
     controls.push_back({control,x,y,width,height,font_kind});
     return control;
@@ -1026,60 +1017,14 @@ LRESULT CALLBACK preset_button_procedure(
         : DefWindowProcW(window,message,w_param,l_param);
 }
 
-struct MidiPlaybackData {
-    HMIDIOUT output;
-    HANDLE stop_event;
-    int bpm;
-    ncnl::MidiRhythm rhythm;
-    ULONGLONG start_ms;
-};
-
-struct MidiOutputApi {
-    decltype(&midiOutOpen) open=&midiOutOpen;
-    decltype(&midiOutClose) close=&midiOutClose;
-    decltype(&midiOutReset) reset=&midiOutReset;
-    decltype(&midiOutShortMsg) message=&midiOutShortMsg;
-    decltype(&midiOutGetNumDevs) count=&midiOutGetNumDevs;
-} midi_output_api;
-
-struct MidiMessageLock {
-    CRITICAL_SECTION section;
-    MidiMessageLock() { InitializeCriticalSection(&section); }
-    ~MidiMessageLock() { DeleteCriticalSection(&section); }
-} midi_message_lock;
-
-void send_midi_message(HMIDIOUT output,DWORD message) {
-    EnterCriticalSection(&midi_message_lock.section);
-    midi_output_api.message(output,message);
-    LeaveCriticalSection(&midi_message_lock.section);
+void send_midi_message(HMIDIOUT,DWORD message) {
+    if(ncnlplug::host_callbacks.midi) ncnlplug::host_callbacks.midi(ncnlplug::host_callbacks.context,message);
 }
-
 MMRESULT open_shared_midi_output() {
-    if (shared_midi_output) { return MMSYSERR_NOERROR; }
-    HMIDIOUT opened=nullptr;
-    MMRESULT result=midi_output_api.open(&opened,MIDI_MAPPER,0,0,CALLBACK_NULL);
-    if (result!=MMSYSERR_NOERROR) {
-
-        UINT count=midi_output_api.count();
-        for (UINT id=0;id<count && result!=MMSYSERR_NOERROR;++id) {
-            opened=nullptr;
-            result=midi_output_api.open(&opened,id,0,0,CALLBACK_NULL);
-        }
-    }
-    if (result==MMSYSERR_NOERROR) {
-        shared_midi_output=opened;
-        send_midi_message(opened,0xC0u);
-        send_midi_message(opened,0xC1u);
-    }
-    return result;
+    shared_midi_output=reinterpret_cast<HMIDIOUT>(1); return MMSYSERR_NOERROR;
 }
-
-void show_midi_open_error(HWND owner,MMRESULT error) {
-    wchar_t detail[256]={};
-    midiOutGetErrorTextW(error,detail,256);
-    std::wostringstream message;
-    message<<L"无法打开 Windows MIDI 播放设备。\n错误码："<<error<<L"\n"<<detail;
-    MessageBoxW(owner,message.str().c_str(),L"无法播放",MB_OK|MB_ICONERROR);
+void show_midi_open_error(HWND owner,MMRESULT) {
+    MessageBoxW(owner,L"宿主尚未开启音频处理，请先启用 DAW 音频设备。",L"播放提示",MB_OK);
 }
 
 void invalidate_piano_keys() {
@@ -1130,96 +1075,21 @@ void release_key_preview() {
     else { SetTimer(main_window,KEY_PREVIEW_TIMER,static_cast<UINT>(160-elapsed),nullptr); }
 }
 
-DWORD WINAPI midi_playback_procedure(LPVOID parameter) {
-    std::unique_ptr<MidiPlaybackData> data(
-        static_cast<MidiPlaybackData*>(parameter)
-    );
 
-    send_midi_message(data->output,0xC0u);
-    auto schedule=ncnl::midi_playback_schedule(data->rhythm);
-    double beat_ms=60000.0/std::max(1,data->bpm);
-    double loop_ms=data->rhythm.length*beat_ms;
-    std::uint64_t loop=0;
-    bool stopping=false;
-    while (!stopping) {
-        for (const auto& note:schedule) {
-            double deadline=data->start_ms+loop*loop_ms+note.time/ncnl::PLAYBACK_UNITS_PER_BEAT*beat_ms;
-            stopping=wait_midi_deadline(data->stop_event,deadline);
-            if (stopping) { break; }
-            send_midi_note(data->output,note.pitch,note.velocity,note.on);
-        }
-        if (!stopping) {
-            stopping=wait_midi_deadline(data->stop_event,data->start_ms+(loop+1)*loop_ms);
-        }
-        ++loop;
-    }
-
-    send_midi_message(data->output,0xB0u|(64u<<8));
-    send_midi_message(data->output,0xB0u|(123u<<8));
-    send_midi_message(data->output,0xB0u|(120u<<8));
-    return 0;
-}
 
 void stop_midi_playback() {
-    if (main_window) { KillTimer(main_window,PLAYBACK_TIMER); }
-    playback_loop_ms=0.0;
-    update_animation_clock();
-    if (main_window) { InvalidateRect(main_window,nullptr,FALSE); }
-    if (!midi_playback_thread) {
-        return;
-    }
-    SetEvent(midi_stop_event);
-    if (WaitForSingleObject(midi_playback_thread,5000)==WAIT_OBJECT_0) {
-        CloseHandle(midi_playback_thread);
-        CloseHandle(midi_stop_event);
-        midi_playback_thread=nullptr;
-        midi_stop_event=nullptr;
-    }
+    ncnlplug::host_preview=false;
+    if(ncnlplug::host_callbacks.preview) ncnlplug::host_callbacks.preview(ncnlplug::host_callbacks.context,false);
+    playback_loop_ms=0; update_animation_clock();
+    if(main_window) InvalidateRect(main_window,nullptr,FALSE);
 }
 
 void toggle_midi_playback(HWND owner) {
-    if (midi_playback_thread) {
-        stop_midi_playback();
-        return;
-    }
-
-    std::unique_ptr<MidiPlaybackData> data(new MidiPlaybackData{});
     bool has_notes=false;
-    for (const auto& event:rhythm.events) { has_notes=has_notes || !event.pitches.empty(); }
-    if (!has_notes) {
-        MessageBoxW(owner,L"请先导入 MIDI 或生成和弦。",L"无法播放",MB_OK|MB_ICONINFORMATION);
-        return;
-    }
-    data->rhythm=rhythm;
-
-    MMRESULT opened=open_shared_midi_output();
-    if (opened!=MMSYSERR_NOERROR) {
-        show_midi_open_error(owner,opened);
-        return;
-    }
-    data->output=shared_midi_output;
-
-    midi_stop_event=CreateEventW(nullptr,TRUE,FALSE,nullptr);
-    if (!midi_stop_event) {
-        MessageBoxW(owner,L"无法创建播放事件。",L"无法播放",MB_OK|MB_ICONERROR);
-        return;
-    }
-    data->stop_event=midi_stop_event;
-    data->bpm=BPM;
-    data->start_ms=monotonic_ms();
-    playback_start_ms=data->start_ms;
-    midi_playback_thread=CreateThread(
-        nullptr,0,midi_playback_procedure,data.get(),0,nullptr
-    );
-    if (!midi_playback_thread) {
-        CloseHandle(midi_stop_event);
-        midi_stop_event=nullptr;
-        MessageBoxW(owner,L"无法创建播放线程。",L"无法播放",MB_OK|MB_ICONERROR);
-        return;
-    }
-    playback_loop_ms=rhythm.length*60000.0/std::max(1,BPM);
-    update_animation_clock();
-    data.release();
+    for(const auto& e:rhythm.events) has_notes=has_notes || !e.pitches.empty();
+    if(!has_notes) { MessageBoxW(owner,L"请先导入 MIDI 或生成和弦。",L"播放提示",MB_OK); return; }
+    ncnlplug::host_preview=!ncnlplug::host_preview;
+    if(ncnlplug::host_callbacks.preview) ncnlplug::host_callbacks.preview(ncnlplug::host_callbacks.context,ncnlplug::host_preview);
 }
 
 void generate_and_show(HWND owner) {
@@ -1243,6 +1113,13 @@ void generate_and_show(HWND owner) {
         auto generated=ncnl::generate_progression(
             current_mode,constraints
         );
+        std::size_t count=0;
+        for(std::size_t block=0;block<chord_blocks.size();++block) {
+            auto pitches=ncnl::parse_roll_notes(generated.chords[block].notes).size();
+            for(std::size_t event=chord_blocks[block].first;event<chord_blocks[block].last;++event)
+                count+=constraints[block].fixed_notes.empty()?pitches:rhythm.events[event].pitches.size();
+        }
+        if(count>ncnlplug::MAX_NOTES) throw std::runtime_error("展开后的 MIDI 超过 65536 个音符，请缩短节奏或减少和弦内音。");
         remember_edit();
         displayed_progression=std::move(generated);
         for (std::size_t position=0;position<chord_blocks.size();++position) {
@@ -1383,6 +1260,9 @@ bool create_midi_note_at_client_point(HWND window,POINT point) {
     double x=0,y=0;
     piano_logical_point(window,point,x,y);
     if (x<132 || x>=950 || y<ROLL_GRID_TOP || y>=645) { return false; }
+    if(midi_note_count()>=ncnlplug::MAX_NOTES) {
+        MessageBoxW(window,L"已达到 65536 个 MIDI 音符的实时处理上限。",L"插件编辑提示",MB_OK); return true;
+    }
     int rows=roll_high_pitch-roll_low_pitch+1;
     int pitch=roll_high_pitch-std::min(rows-1,static_cast<int>((y-ROLL_GRID_TOP)/(ROLL_GRID_HEIGHT/rows)));
     double beat=(x-132)/818*rhythm.length;
@@ -1409,6 +1289,9 @@ bool create_midi_note_at_client_point(HWND window,POINT point) {
     double start=std::max(previous_end,std::floor(beat*4.0)/4.0);
     double end=std::min(next_start,start+0.25);
     if (end<=start) { return false; }
+    if(rhythm.events.size()>=ncnlplug::MAX_EVENTS) {
+        MessageBoxW(window,L"已达到 8192 个节奏事件的实时处理上限。",L"插件编辑提示",MB_OK); return true;
+    }
     std::size_t block=0;
     while (block+1<chord_blocks.size() && beat>=block_end(block)) { ++block; }
     stop_midi_playback();
@@ -1682,6 +1565,7 @@ std::vector<unsigned char> read_midi_file(const std::wstring& path) {
 bool import_midi_file(HWND owner,const std::wstring& path) {
     try {
         auto imported=ncnl::parse_midi_rhythm(read_midi_file(path));
+        if(imported.events.size()>ncnlplug::MAX_EVENTS) throw std::runtime_error("节奏超过 8192 个事件，请缩短 MIDI 后重新导入。");
         remember_edit();
         stop_midi_playback();
         discard_note_effects();
@@ -1783,6 +1667,11 @@ bool commit_chord_editor(bool show_error) {
         }
         else {
             ncnl::parse_chord(notes);
+            std::size_t count=midi_note_count();
+            const auto& block=chord_blocks[static_cast<std::size_t>(position)];
+            for(std::size_t event=block.first;event<block.last;++event) count-=rhythm.events[event].pitches.size();
+            count+=(block.last-block.first)*ncnl::parse_roll_notes(notes).size();
+            if(count>ncnlplug::MAX_NOTES) throw std::runtime_error("展开后的 MIDI 超过 65536 个音符，请缩短节奏或减少和弦内音。");
             double score=ncnl::chord_emotion_score(current_mode,notes);
             remember_edit();
             stop_midi_playback();
@@ -3197,6 +3086,7 @@ LRESULT CALLBACK configuration_window_procedure(
         }
         break;
     case WM_LBUTTONDOWN: {
+        SetFocus(window);
         Gdiplus::PointF point=configuration_logical_point(window,l_param);
         for (int tab=0;tab<3;++tab) {
             if (configuration_tab_bounds(tab).Contains(point)) {
@@ -3324,7 +3214,7 @@ void open_configuration_window(HWND owner) {
     configuration_window=CreateWindowExW(
         WS_EX_LAYERED,L"NoChordNoLifeConfigurationWindow",L"NoChordNoLife 配置",
         style,position.x,position.y,size.right-size.left,size.bottom-size.top,
-        owner,nullptr,GetModuleHandleW(nullptr),nullptr
+        owner,nullptr,ncnl::runtime_module(),nullptr
     );
     if (!configuration_window) {
         MessageBoxW(owner,L"无法创建配置窗口。",L"配置",MB_OK|MB_ICONERROR);
@@ -3357,14 +3247,14 @@ LRESULT CALLBACK window_procedure(
         main_window=window;
         SetWindowLongPtrW(window,GWL_STYLE,GetWindowLongPtrW(window,GWL_STYLE)|WS_CLIPCHILDREN);
         plugin_container=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,
-            0,0,1,1,window,nullptr,GetModuleHandleW(nullptr),nullptr);
+            0,0,1,1,window,nullptr,ncnl::runtime_module(),nullptr);
         refresh_plugins(window);
         initialize_rhythm();
         DragAcceptFiles(window,TRUE);
         chord_editor=CreateWindowExW(
             0,L"EDIT",L"",
             WS_CHILD|WS_BORDER|ES_CENTER|ES_AUTOHSCROLL,
-            0,0,1,1,window,nullptr,GetModuleHandleW(nullptr),nullptr
+            0,0,1,1,window,nullptr,ncnl::runtime_module(),nullptr
         );
         chord_editor_procedure_original=reinterpret_cast<WNDPROC>(
             SetWindowLongPtrW(
@@ -3429,6 +3319,7 @@ LRESULT CALLBACK window_procedure(
 
     case WM_LBUTTONDOWN: {
         POINT plugin_point={GET_X_LPARAM(l_param),GET_Y_LPARAM(l_param)};
+        SetFocus(window);
         if (switch_plugin_at(window,plugin_point) || plugin_manager.active_index()!=0) { return 0; }
         if (editing_chord>=0) {
             commit_chord_editor(false);
@@ -3800,185 +3691,12 @@ LRESULT CALLBACK window_procedure(
         dissolving_notes.clear();
         stop_midi_playback();
         stop_key_preview();
-        if (shared_midi_output && !midi_playback_thread) {
-            midi_output_api.reset(shared_midi_output);
-            midi_output_api.close(shared_midi_output);
-            shared_midi_output=nullptr;
-        }
+        shared_midi_output=nullptr;
         destroy_main_background_buffer();
-        PostQuitMessage(0);
+        main_window=nullptr;
         return 0;
     }
     return DefWindowProcW(window,message,w_param,l_param);
 }
 
-}
-
-int WINAPI WinMain(HINSTANCE instance,HINSTANCE,LPSTR,int show_command) {
-    try { initialize_runtime_storage(executable_directory()); }
-    catch (const std::exception& error) { MessageBoxW(nullptr,utf8_to_wide(error.what()).c_str(),L"启动失败",MB_OK|MB_ICONERROR); return 1; }
-    using SetProcessDpiAwareFunction=BOOL (WINAPI*)();
-    auto set_process_dpi_aware=reinterpret_cast<SetProcessDpiAwareFunction>(
-        GetProcAddress(GetModuleHandleW(L"user32.dll"),"SetProcessDPIAware")
-    );
-    if (set_process_dpi_aware) {
-        set_process_dpi_aware();
-    }
-
-    Gdiplus::GdiplusStartupInput gdiplus_input;
-    if (Gdiplus::GdiplusStartup(&gdiplus_token,&gdiplus_input,nullptr)!=Gdiplus::Ok) {
-        MessageBoxW(nullptr,L"无法初始化图片组件。",L"启动失败",MB_OK|MB_ICONERROR);
-        return 1;
-    }
-
-    load_interface_font(L":/assets/res/font.ttf");
-
-    load_application_skins(L":/assets");
-    load_interface_images();
-
-    const wchar_t CLASS_NAME[]=L"NoChordNoLifeGeneratorWindow";
-    WNDCLASSW window_class{};
-    window_class.style=CS_DBLCLKS;
-    window_class.lpfnWndProc=window_procedure;
-    window_class.hInstance=instance;
-    window_class.lpszClassName=CLASS_NAME;
-    window_class.hCursor=LoadCursorW(nullptr,IDC_ARROW);
-    window_class.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(1));
-    window_class.hbrBackground=nullptr;
-
-    if (!RegisterClassW(&window_class)) {
-        ncnl_button_art.reset(); plugin_tab_art.reset();
-        unload_interface_font();
-        Gdiplus::GdiplusShutdown(gdiplus_token);
-        return 1;
-    }
-
-    WNDCLASSW configuration_class{};
-    configuration_class.style=CS_DBLCLKS;
-    configuration_class.lpfnWndProc=configuration_window_procedure;
-    configuration_class.hInstance=instance;
-    configuration_class.lpszClassName=L"NoChordNoLifeConfigurationWindow";
-    configuration_class.hCursor=LoadCursorW(nullptr,IDC_ARROW);
-    configuration_class.hIcon=window_class.hIcon;
-    configuration_class.hbrBackground=nullptr;
-    if (!RegisterClassW(&configuration_class)) {
-        ncnl_button_art.reset(); plugin_tab_art.reset();
-        unload_interface_font();
-        Gdiplus::GdiplusShutdown(gdiplus_token);
-        return 1;
-    }
-
-    DWORD style=WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX;
-    DWORD ex_style=0;
-    RECT initial_size={0,0,DESIGN_WIDTH,DESIGN_HEIGHT};
-    AdjustWindowRectEx(&initial_size,style,FALSE,ex_style);
-
-    HWND window=CreateWindowExW(
-        ex_style,CLASS_NAME,L"NoChordNoLife！",
-        style,
-        CW_USEDEFAULT,CW_USEDEFAULT,
-        initial_size.right-initial_size.left,
-        initial_size.bottom-initial_size.top,
-        nullptr,nullptr,instance,nullptr
-    );
-    if (!window) {
-        ncnl_button_art.reset(); plugin_tab_art.reset(); plugin_button_art.clear();
-        background_image.reset();
-        pentagon_image.reset(); button_artworks.reset();
-        for (auto& skin:configuration_skins) { skin.reset(); }
-        unload_interface_font();
-        Gdiplus::GdiplusShutdown(gdiplus_token);
-        return 1;
-    }
-
-    SendMessageW(window,WM_SETICON,ICON_SMALL,reinterpret_cast<LPARAM>(LoadImageW(instance,MAKEINTRESOURCEW(1),IMAGE_ICON,
-        GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED)));
-    ShowWindow(window,show_command);
-    UpdateWindow(window);
-
-    MSG message{};
-    while (GetMessageW(&message,nullptr,0,0)>0) {
-        bool first_key_press=(message.lParam&(1LL<<30))==0;
-        bool editing=message.hwnd==chord_editor || GetFocus()==chord_editor;
-        bool main_window_key=GetAncestor(message.hwnd,GA_ROOT)==main_window && plugin_manager.active_index()==0;
-        if (main_window_key || (configuration_window && GetAncestor(message.hwnd,GA_ROOT)==configuration_window) ||
-            (ncnl::preset_library_window() && GetAncestor(message.hwnd,GA_ROOT)==ncnl::preset_library_window())) {
-            track_mouse_feedback_message(message);
-        }
-        if (main_window_key && message.hwnd!=main_window &&
-            (message.message==WM_MBUTTONDOWN || message.message==WM_MBUTTONUP)) {
-            POINT point={GET_X_LPARAM(message.lParam),GET_Y_LPARAM(message.lParam)};
-            MapWindowPoints(message.hwnd,main_window,&point,1);
-            SendMessageW(main_window,message.message,message.wParam,MAKELPARAM(point.x,point.y));
-            continue;
-        }
-        if (main_window_key && message.message==WM_KEYDOWN && message.wParam=='Z' &&
-            (GetKeyState(VK_CONTROL)&0x8000) && !editing) {
-            cancel_header_drag(main_window,true);
-            if (first_key_press) { undo_last_edit(); }
-            continue;
-        }
-        if (main_window_key &&
-            (message.message==WM_RBUTTONDOWN ||
-             (message.message==WM_MOUSEMOVE && (message.wParam&MK_RBUTTON)))) {
-            POINT point={GET_X_LPARAM(message.lParam),GET_Y_LPARAM(message.lParam)};
-            MapWindowPoints(message.hwnd,main_window,&point,1);
-            if (message.message==WM_RBUTTONDOWN) {
-                dragged_midi_position=-1;
-                dragged_midi_event=-1;
-                dragged_midi_pitch=-1;
-                SetCapture(main_window);
-            }
-            SendMessageW(
-                main_window,WM_CLEAR_CHORD_HOVER,0,
-                MAKELPARAM(point.x,point.y)
-            );
-            continue;
-        }
-        if (main_window_key && message.message==WM_RBUTTONUP) {
-            if (GetCapture()==main_window && !middle_dragging) {
-                ReleaseCapture();
-            }
-            continue;
-        }
-        if (message.message==WM_KEYDOWN && first_key_press && !editing &&
-            main_window_key) {
-            cancel_header_drag(main_window,true);
-            if (message.wParam==VK_SPACE) {
-                toggle_midi_playback(window);
-                continue;
-            }
-            if (message.wParam==VK_RETURN) {
-                SendMessageW(
-                    window,WM_COMMAND,MAKEWPARAM(ID_GENERATE,BN_CLICKED),
-                    reinterpret_cast<LPARAM>(generate_button)
-                );
-                continue;
-            }
-        }
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
-    }
-
-    background_image.reset();
-    pentagon_image.reset(); button_artworks.reset();
-    ncnl_button_art.reset(); plugin_tab_art.reset(); plugin_button_art.clear();
-    for (auto& skin:configuration_skins) { skin.reset(); }
-    arrow_image.reset();
-    for (auto& image:emotion_images) {
-        image.reset();
-    }
-    for (auto& animation:emotion_animations) { animation.frames.clear(); }
-    if (title_font) {
-        DeleteObject(title_font);
-    }
-    if (normal_font) {
-        DeleteObject(normal_font);
-    }
-    if (card_font) {
-        DeleteObject(card_font);
-    }
-    unload_interface_font();
-    Gdiplus::GdiplusShutdown(gdiplus_token);
-    return static_cast<int>(message.wParam);
 }

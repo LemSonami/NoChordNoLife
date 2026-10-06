@@ -1,3 +1,4 @@
+#include "../host/runtime.hpp"
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -441,11 +442,11 @@ LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM w,LPARAM l) {
     case WM_CREATE:
         library->window=window;
         library->editor=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,
-            0,0,1,1,window,nullptr,GetModuleHandleW(nullptr),nullptr);
+            0,0,1,1,window,nullptr,ncnl::runtime_module(),nullptr);
         SendMessageW(library->editor,EM_SETLIMITTEXT,100,0);
         library->edit_original=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(library->editor,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(edit_procedure)));
         library->renamer=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_TABSTOP|ES_AUTOHSCROLL,
-            0,0,1,1,window,nullptr,GetModuleHandleW(nullptr),nullptr);
+            0,0,1,1,window,nullptr,ncnl::runtime_module(),nullptr);
         SendMessageW(library->renamer,EM_SETLIMITTEXT,100,0);
         SetWindowLongPtrW(library->renamer,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(edit_procedure));
         layout(window); return 0;
@@ -620,7 +621,7 @@ void open_preset_library(HWND owner,const std::wstring& directory,const std::wst
             library->buttons.load(ButtonArt::Refresh,button_directory);
             library->buttons.load(ButtonArt::Save,button_directory);
         }
-        WNDCLASSW type{}; type.style=CS_DBLCLKS; type.lpfnWndProc=procedure; type.hInstance=GetModuleHandleW(nullptr);
+        WNDCLASSW type{}; type.style=CS_DBLCLKS; type.lpfnWndProc=procedure; type.hInstance=ncnl::runtime_module();
         type.hIcon=LoadIconW(type.hInstance,MAKEINTRESOURCEW(1));
         type.lpszClassName=L"NoChordNoLifePresetLibrary"; RegisterClassW(&type);
         DWORD style=WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX; RECT size={0,0,1000,1000}; AdjustWindowRect(&size,style,FALSE);
