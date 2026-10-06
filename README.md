@@ -15,17 +15,20 @@
 
 #### 调式：
 ![Mode](figure/Mode.png)
+
 长按鼠标左键，转动这个五度圈，可以设置**调式的主音**（对，就是正上方的那个音）。<br>
 五度圈下面的那七个，从Ionian到Locrian，便是七种中古调式。<br>
 点击<span style="color: pink; font-size: 18px">「决定了，就是你！」</span>或按快捷键**Enter**可以应用调式配置。
 
 #### 和弦进行评价标准：
 ![penta_dim_of_chord_progression](figure/penta_dim_of_chord_progression.png)
+
 一个五位雷达图，通过拖拽五边形的顶点实时调整和弦进行评价标准。<br>
 这套标准用来衡量和弦进行是否流畅。如果没有这套标准，那和弦生成完全就是随机、随便的。和弦行进不流畅的直接影响是听感刺耳、无逻辑。
 
 #### 插件管理：
 ![plugin_manager](figure/plugin_manager.png)
+
 <span style="color: #b4fc40; font-size: 15px">暂时没什么用。</span><br>
 在这里配置附加插件的启用/禁用情况。
 
@@ -64,6 +67,7 @@
 每20分做一道分界，可以划分出5个区域。
 
 ![emo](figure/emo.png)
+
 <span style="color: #66ccff; font-size: 15px">萌萌哒天依正在视奸你.png</span>
 
 从左到右，情感色彩值升高，分别为：<br>
@@ -158,4 +162,5 @@ FL Studio等DAW宿主软件的[插件开发指南](https://www.image-line.com/fl
 
 ※ 开发NCNL的插件，已经想好了倒是——<br>
 实时读取传入的midi音符，在五度圈上实时显示构成的几何图形，或许会有利于 *和弦几何学* 的研究，<br>
-<span style="color: #e14119; font-size: 15px">⚠ 但这种功能只能用于插件版，只有插件能对接入宿主软件实时传入的midi。</span>
+<span style="color: #e14119; font-size: 15px">
+⚠ 但这种功能只能用于插件版，只有插件能对接入宿主软件实时传入的midi。</span>
