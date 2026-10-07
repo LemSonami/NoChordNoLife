@@ -1,5 +1,7 @@
 # NoChordNoLife （插件版）
 
+宣传片/介绍视频：[[和弦生成器] ⚠工业化制冰小玩具♥工具代替大脑模型代替思考🤔](https://www.bilibili.com/video/BV1ftHk6zEE1)
+
 ⚠ 注意，这是 Windows 64 位 VST3 音源插件，需要交给 FL Studio 等支持 VST3 的 DAW 加载 ⚠
 
 ## 使用教程
