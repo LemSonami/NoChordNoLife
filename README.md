@@ -154,6 +154,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\src\tools\build.ps1
 FL Studio等DAW宿主软件的[插件开发指南](https://www.image-line.com/fl-studio-learning/fl-studio-beta-online-manual/html/plugins_supported.htm)。
 
 ## 未来开发计划
+
 ※ 增加联网检索更新功能（？
 
 ※ 把文本全部修改为键，通过键值对映射的方式显示文本，<br>
