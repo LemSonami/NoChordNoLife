@@ -1,5 +1,7 @@
 # [NCNL] NoChordNoLife/弦歌成囚
 
+宣传片/介绍视频：[[和弦生成器] ⚠工业化制冰小玩具♥工具代替大脑模型代替思考🤔](https://www.bilibili.com/video/BV1ftHk6zEE1)
+
 <span style="color: pink; font-size: 40px">待补充，别偷懒好不好你个大懒猫</span>
 
 ## 使用教程
